@@ -1152,6 +1152,7 @@ function includeLoglevel() {
     xhttp.onreadystatechange = function() {
         if (this.readyState == 4 && this.status == 200) {
            eval(xhttp.responseText);
+           // TODO: This line doesn't actually init the logger. woodman.load('console') needs to be called manually :-(
            woodman.load('console');
            window.logger = woodman.getLogger('main');
            logger.level = "warn";
@@ -1492,24 +1493,40 @@ function leaderDiscountRatio(btn, resName){
 function variableForPraiseSun(){
     if(!gamePage.religionTab.visible)
         return null;
+    //var faithLog = woodman.getLogger("main.faith");
     gamePage.religionTab.render();
     var halfFaith = game.resPool.get("faith").maxValue / 2;
+    var additionalWorship = halfFaith * (1 + game.religion.getApocryphaBonus());
+    // TODO: Faith is not 1-1 with worship after apocrypha / transcend etc.
     // What a crumbily named variable :-(. Hysterical raisins I suppose.
     var worship = game.religion.faith;
     var nextUnlockBtn = gamePage.religionTab.rUpgradeButtons.find(ru => !ru.model.visible);
     var revolutionBtn = gamePage.religionTab.rUpgradeButtons.find(ru => ru.id == "solarRevolution");
     // Utility for unlocking another option to work towards.
     var worshipToUnlockNextOption = nextUnlockBtn ? nextUnlockBtn.model.metadata.faith - worship: -1;
-    var howFarDoesPraiseGetUs = Math.min(1, halfFaith / worshipToUnlockNextOption);
+    var howFarDoesPraiseGetUs = Math.min(1, additionalWorship / worshipToUnlockNextOption);
     var utility = nextUnlockBtn ? howFarDoesPraiseGetUs : 0;
+    //faithLog.info("Utility for unlocks: %f (additionalWorship: %f, worshipToUnlockNextOption: %f, howFarDoesPraiseGetUs: %f)", utility, additionalWorship, worshipToUnlockNextOption, howFarDoesPraiseGetUs);
     if(revolutionBtn.model.metadata.val > 0){
-        // TODO: Boost utility for gathering worship if we have solar revolution.
+        var currentSolRevBonus = calculateSolarRevolutionRatio(worship);
+        var predictedSolRevBonus = calculateSolarRevolutionRatio(worship + additionalWorship);
+        var extraSolRevBonusPP = predictedSolRevBonus - currentSolRevBonus;
+        // How much is another 1% production worth? Quite a damn lot!
+        var utilityForSolRev = extraSolRevBonusPP * 100 * 20;
+        //faithLog.info("Utility for solar revolution bonus: %f (currentSolRevBonus: %f, predictedSolRevBonus: %f)", utilityForSolRev, currentSolRevBonus, predictedSolRevBonus);
+        utility += utilityForSolRev;
     }
     return {
         name: "PraiseTheSun",
         faith: halfFaith,
         utility: utility
     }
+}
+
+// religion.js getSolarRevolutionRatio line 1068
+function calculateSolarRevolutionRatio (worship) {
+    var uncappedBonus = game.religion.getRU("solarRevolution").on ? game.getUnlimitedDR(worship, 1000) / 100 : 0;
+    return game.getLimitedDR(uncappedBonus, 10 + game.getEffect("solarRevolutionLimit") + (game.challenges.getChallenge("atheism").researched ? (game.religion.transcendenceTier) : 0)) * (1 + game.getLimitedDR(game.getEffect("faithSolarRevolutionBoost"), 4));
 }
 
 function praiseUnderPlan(){
@@ -1524,7 +1541,8 @@ function praiseUnderPlan(){
     var praisesAvailable = faithAmount / halfFaith;
     //console.log("praiseToDo: %i, faithAmount: %i, halfFaith: %i, praisesAvailable: %i", praiseToDo, faithAmount, halfFaith, praisesAvailable);
     if(praisesAvailable > 1){
-        console.log("About to paise %i ", praisesAvailable);
+        var faithLog = woodman.getLogger("main.faith");
+        faithLog.info("About to paise %i ", praisesAvailable);
         gamePage.religionTab.praiseBtn.buttonContent.click();
         executedPlan.PraiseTheSun = (executedPlan.PraiseTheSun || 0) + praisesAvailable;
     }
@@ -1562,6 +1580,8 @@ function sacrificeUnderPlan(){
     if(sacsToDo <= 0)
         return;
     for(var i = 0; i < sacsToDo; i++){
+        var faithLog = woodman.getLogger("main.faith");
+        faithLog.info("I will bathe in unicorn tears!");
         gamePage.religionTab.sacrificeBtn.buttonContent.click()
     }
     executedPlan["SacrificeUnicorns"] = executedSacs + sacsToDo;

@@ -16,10 +16,6 @@ var eventLoops = {
     gatherHandle: undefined
 };
 
-function planHorizonSeconds(){
-    return (100 - gamePage.calendar.day) * 2;
-}
-
 //#region Control Of event loops
 function go() {
     restartExecLoop();
@@ -115,6 +111,7 @@ function observeTheSky(){
 
 //#endregion
 
+//#region Plan
 var plan;
 var model;
 var executedPlan;
@@ -129,6 +126,10 @@ function planNow(){
     console.log(model);
     console.log(plan);
     console.timeEnd("planNow");
+}
+
+function planHorizonSeconds(){
+    return (100 - gamePage.calendar.day) * 2;
 }
 
 function secretUnlocks() {
@@ -247,6 +248,7 @@ function buildModel() {
     model.constraints.kittens.max -= reservedFarmers;
     return model;
 }
+//#endregion Plan
 
 //#region Buyables
 function getBuyables(feasible = true) {
@@ -1166,19 +1168,6 @@ includeLoglevel();
 
 //#endregion
 
-// Get an identifiable id string for a button to tie solver together with buttons in ui
-function buttonId(btn){
-    if(btn.name)
-        return btn.name;
-    if(btn.race)
-        return btn.race.name + "Embassy";
-    if(btn.opts.building)
-        return btn.opts.building;
-    if(btn.opts.id)
-        return btn.opts.id;
-    return btn.opts.name;
-}
-
 //#region Leadership
 
 // TODO: Make Leader a manager almost all the time and make this be the kitten that gets ranks.
@@ -1588,3 +1577,20 @@ function sacrificeUnderPlan(){
 }
 
 //#endregion
+
+//#region Utilities
+
+// Get an identifiable id string for a button to tie solver together with buttons in ui
+function buttonId(btn){
+    if(btn.name)
+        return btn.name;
+    if(btn.race)
+        return btn.race.name + "Embassy";
+    if(btn.opts.building)
+        return btn.opts.building;
+    if(btn.opts.id)
+        return btn.opts.id;
+    return btn.opts.name;
+}
+
+//#endregion Utilities

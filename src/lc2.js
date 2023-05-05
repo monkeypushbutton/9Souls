@@ -62,24 +62,25 @@ function restartExecLoop(){
 
 //#region Execution
 
+var execLog = woodman.getLogger("main.Execution")
 function executePlanNow(timesBought = 0){
-    console.log("Executing");
+    //execLog.log("Executing");
     praiseUnderPlan();
     if(gamePage.calendar.season != plannedSeason){
-        console.log("Replanning (season)");
+        execLog.log("Replanning (season)");
         planNow();
     }
     if(getBuyables().length != plannedButtons.length){
         //Mainly so we don't have to wait a whole season to build a field :-)
-        console.log("Replanning (possibilities changed)");
+        execLog.log("Replanning (possibilities changed)");
         planNow();
     }
     if(game.resPool.get("kittens").value != plannedKittens){        
         //Mainly so we don't have to wait a whole season to build a field :-)
-        console.log("Replanning (kittens changed)");
+        execLog.log("Replanning (kittens changed)");
         planNow();
     }
-    console.time("executePlan");
+    //console.time("executePlan");
     promoteUnderPlan();
     observeTheSky();
     controlGatherLoop();
@@ -94,9 +95,9 @@ function executePlanNow(timesBought = 0){
     if(timesBought < 5){
         bought = buyUnderPlan();
     }
-    console.timeEnd("executePlan");
+    //console.timeEnd("executePlan");
     if(bought){
-        console.log("Replanning (bought something)");
+        execLog.log("Replanning (bought something)");
         planNow();
         executePlanNow(timesBought + 1);
     }
@@ -181,6 +182,7 @@ function canAffordHowManyNow(btn){
 }
 
 function buildModel() {
+    // TODO: Build a model with steamworks on or off. Plan twice and execute plan with best utility.
     model = {
         optimize: "utility",
         opType: "max",
@@ -251,6 +253,7 @@ function buildModel() {
 //#endregion Plan
 
 //#region Buyables
+var buyableLog = woodman.getLogger("main.buyable");
 function getBuyables(feasible = true) {
     //console.time("getBuyables");
     // console.time("bldTab.render");
@@ -302,6 +305,8 @@ function variableFromButton(btn, outOfReach){
 }
 
 function buttonUtility(btn, outOfReach = null){
+    // if(outOfReach)
+    //     console.time("buttonUtility")
     // Some buildings are just really good and some are real stinkers in the context of this script.
     var id = buttonId(btn)
     var utility = 0;
@@ -331,22 +336,22 @@ function buttonUtility(btn, outOfReach = null){
         // Hunting is just more a straight up more efficient use of manpower.
         else if(id == "mint")
             baseutility = 0.2;
+        else if(id == "steamworks"){
+            // Steamworks are pretty bad before megneto (I think)
+            var magnetos = gamePage.bld.get("magneto").val
+            baseutility = magnetos == 0 ? 0.2 : 1;
+        }
         else if(gamePage.bld.buildingGroups.find(bg => bg.name == "population").buildings.includes(id))
             baseutility =  6;
-        // We're almost blocked by max science in early game at least.
-        // No longer needed after incentiviseStorage stuff.
-        // else if(gamePage.bld.buildingGroups.find(bg => bg.name == "science").buildings.includes(id))
-        //     baseutility =  4;
+        //buyableLog.log("%s: Base utility: %f", id, baseutility.toFixed(4));
         // Give them diminishing returns to incentivise climbing the tech tree faster.
         var builtAlready = btn.model.metadata.val
-        //console.log(id, baseutility, builtAlready)
         utility = baseutility - game.getLimitedDR(builtAlready, baseutility);
+        //buyableLog.log("%s: Have %i Discounted utility: %f", id, builtAlready, utility.toFixed(4));
         // Storage buildings are more useful than they appear naively, beacause we want to push up the tech tree for example.
         if(outOfReach && Object.keys(btn.model.metadata.effects).find(e => e.endsWith("Max")) ){
-            //console.log("Extra utility for storage on object %s", buttonId(btn))
+            //buyableLog.debug("Evaluating extra utility for storage on object %s", buttonId(btn))
             for(var infeasible of outOfReach){
-                var infeasibleUtility = buttonUtility(infeasible) / 10;
-                //console.log("  Extra utility infeasible %s with base utility %f", buttonId(infeasible), infeasibleUtility)
                 for(var price of infeasible.model.prices){
                     var resource = game.resPool.get(price.name);
                     if( resource.maxValue < price.val ){
@@ -354,8 +359,10 @@ function buttonUtility(btn, outOfReach = null){
                         var capIncrease = btn.model.metadata.effects[resource.name + "Max"] || 0;
                         var percentOfRequired = Math.min(capIncrease / extraCap, 1);
                         if(percentOfRequired > 0){
-                            //console.log("  %s has capped price %s, needs %f extra cap, button %s constributes %f which is %f percent of needed for %f extra utility.", buttonId(infeasible), price.name, extraCap, buttonId(btn), capIncrease , percentOfRequired * 100, infeasibleUtility * percentOfRequired)
-                            utility += infeasibleUtility * percentOfRequired;
+                            var infeasibleUtility = buttonUtility(infeasible) / 10;
+                            var extraUtility = infeasibleUtility * percentOfRequired;
+                            //buyableLog.log("%s: Contributes to %s (utility %f) for %f extra utility. Current utility %f", id, buttonId(infeasible), infeasibleUtility.toFixed(4), extraUtility.toFixed(4), utility.toFixed(4))
+                            utility += extraUtility;
                         }
                     }
                 }
@@ -366,7 +373,11 @@ function buttonUtility(btn, outOfReach = null){
         utility = 1;
     }
     // Jittery
-    return utility * (1 + Math.random() / 10);
+    utility = utility * (1 + Math.random() / 10);
+    //buyableLog.log("%s: Final utility including jitter %s", id, utility.toFixed(4))
+    //if(outOfReach)
+        // console.timeEnd("buttonUtility")
+    return utility;
 }
 
 function buyUnderPlan(){
@@ -583,7 +594,6 @@ function getTradeableRaces() {
 function variableFromTrade(tradeRace) {
     // TODO: Pretty sure I'm not doing tradeRatio correctly - is there a better way to simulate this as with production
     // diplomacy.tradeImpl, but without side effects?
-    var ratio = game.diplomacy.getTradeRatio();
     tv = {
         name: "Trade|" + buttonId(tradeRace),
         manpower: 50,
@@ -665,6 +675,7 @@ function variableFromTrade(tradeRace) {
 }
 
 function executeTrades(){
+    //var craftLog = woodman.getLogger("main.Craft");
     for(tradeable in plan) {
         if(!tradeable.startsWith("Trade")){
             continue;
@@ -686,7 +697,6 @@ function executeTrades(){
             return;
         var prevLeader = doLeaderChangeTrait("merchant");
         for(tn = 0; tn < tradesToPerform; tn++){
-
             // Good to free up capacity (looking at you sharks)
             executeCrafts();
             tradeBtn.buttonContent.click()
@@ -700,6 +710,7 @@ function executeTrades(){
 
 //#region Crafts
 
+var craftLog = woodman.getLogger("main.Craft");
 function getCrafts(){
     if(gamePage.workshopTab.visible)
         return gamePage.workshopTab.craftBtns.filter(b => b.model.visible && isFeasible(b));
@@ -752,7 +763,6 @@ function executeCrafts(){
         if(!craftable.startsWith("Craft")){
             continue;
         }
-        var craftLog = woodman.getLogger("main.Craft");
         alreadyDone = executedPlan[craftable] || 0;
         numDesiredRemaining = Math.ceil(plan[craftable] - alreadyDone);
         if(numDesiredRemaining < 1)
@@ -763,7 +773,7 @@ function executeCrafts(){
         if(!btn){
             craftLog.warn("Couldn't locate craft button for ", craftName, ". WTF?");
             continue;
-        }            
+        }
         numCanAfford = canAffordHowManyNow(btn);
         if(numCanAfford < 1)
             continue;
@@ -772,7 +782,7 @@ function executeCrafts(){
             continue;
         
         var oldLeader = switchLeaderToCraft(craftName);
-        craftLog.info("Crafting ", numToActuallyCraft, " ", craftName, " (", alreadyDone + numToActuallyCraft, "/", plan[craftable] ,")")
+        craftLog.info("Crafting %i %s (%i/%f)", numToActuallyCraft, craftName, alreadyDone + numToActuallyCraft, plan[craftable].toFixed(2))
         executedPlan[craftable] = alreadyDone + numToActuallyCraft;
         game.workshop.craft(craftName, numToActuallyCraft)
         changeLeader(oldLeader);
@@ -1501,7 +1511,7 @@ function variableForPraiseSun(){
         var predictedSolRevBonus = calculateSolarRevolutionRatio(worship + additionalWorship);
         var extraSolRevBonusPP = predictedSolRevBonus - currentSolRevBonus;
         // How much is another 1% production worth? Quite a damn lot!
-        var utilityForSolRev = extraSolRevBonusPP * 100 * 20;
+        var utilityForSolRev = extraSolRevBonusPP * 100 * 5;
         //faithLog.info("Utility for solar revolution bonus: %f (currentSolRevBonus: %f, predictedSolRevBonus: %f)", utilityForSolRev, currentSolRevBonus, predictedSolRevBonus);
         utility += utilityForSolRev;
     }

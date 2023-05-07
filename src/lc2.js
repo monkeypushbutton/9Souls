@@ -6,6 +6,7 @@
 
 // NB: Season is ~ 200 seconds long. 
 var executeIntervalSeconds = 20;
+var planHistory = 5;
 var plannedSeason = -1;
 var reservedFarmers = 0;
 var plannedKittens = 0;
@@ -115,13 +116,17 @@ function observeTheSky(){
 var plan;
 var model;
 var executedPlan;
+var historicPlans = new CircularBuffer(planHistory);
+var historicModels = new CircularBuffer(planHistory);
 function planNow(){
     console.time("planNow");
     plannedSeason = gamePage.calendar.season;
     plannedButtons = getBuyables();
     plannedKittens = game.resPool.get("kittens").value;
     model = buildModel();
+    historicModels.push(plan);
     plan = solver.Solve(model);
+    historicPlans.push(plan);
     executedPlan = {};
     console.log(model);
     console.log(plan);
@@ -1655,13 +1660,34 @@ function buttonId(btn){
 function plannedUtilities(){
     var pu = [];
     for(var planItem in plan){
-        logger.log(planItem)
+        //logger.log(planItem)
         if(model.variables[planItem] && model.variables[planItem].utility){
-            logger.log(plan[planItem])
-            pu.push({name: planItem, utilityPerItem: model.variables[planItem].utility, totalUtility: model.variables[planItem].utility * plan[planItem]});
+            //logger.log(plan[planItem])
+            pu.push({name: planItem, utilityPerItem: model.variables[planItem].utility, quantity: plan[planItem], totalUtility: model.variables[planItem].utility * plan[planItem]});
         }
     }
     return pu;
 }
 
+function CircularBuffer(length){
+
+    var pointer = 0, buffer = new Array(length); 
+  
+    return {
+      get  : function(key){return buffer[((pointer - 1) - key + length) % length];},
+      push : function(item){
+        buffer[pointer] = item;
+        pointer = (length + pointer + 1) % length;
+      },
+      toArray : function() {
+        var retArray = [];
+        for(var idx = 0; idx < length; idx++){
+            retArray.push(this.get(idx));
+        }
+        return retArray;
+      }
+    };
+  };
+
 //#endregion Utilities
+

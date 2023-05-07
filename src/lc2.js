@@ -19,6 +19,8 @@ var eventLoops = {
 
 //#region Control Of event loops
 function go() {
+    // Important to not stall when choosing a policy upgrade.
+    game.opts.noConfirm = true;
     restartExecLoop();
 }
 
@@ -414,10 +416,11 @@ function buyUnderPlan(){
             //console.debug(buyButton);
             //console.debug(buyButton.buttonContent);
             window.setTimeout(() => {
+                if(buyButton.update)
+                    buyButton.update();
                 buyButton.buttonContent.click();
                 changeLeader(prevLeader);
-            }, 50)
-            // TODO: Dismiss policy popup.
+            }, 50);
             bought = true;
         }
     }
@@ -1667,6 +1670,14 @@ function plannedUtilities(){
         }
     }
     return pu;
+}
+
+function utilityProgress(btn){
+    var hist = [];
+    for(var plan of historicPlans.toArray()){
+        hist.push((plan[btn] || 0).toFixed(2));
+    }
+    return hist;
 }
 
 function CircularBuffer(length){

@@ -5,7 +5,7 @@
 // TODO: Add variable and implementation for steamworks on vs off. I have a hunch that off with be the right choice 95% of time at least until magnetos.
 
 // NB: Season is ~ 200 seconds long. 
-var executeIntervalSeconds = 10;
+var executeIntervalSeconds = 20;
 var plannedSeason = -1;
 var reservedFarmers = 0;
 var plannedKittens = 0;
@@ -62,7 +62,6 @@ function restartExecLoop(){
 
 //#region Execution
 
-var execLog = woodman.getLogger("main.Execution")
 function executePlanNow(timesBought = 0){
     //execLog.log("Executing");
     praiseUnderPlan();
@@ -191,31 +190,31 @@ function buildModel() {
         ints: {}
     };
     var outOfReach = getBuyables(false);
-    for(btn of getBuyables()){
-        buyVariable = variableFromButton(btn, outOfReach);
+    for(var btn of getBuyables()){
+        var buyVariable = variableFromButton(btn, outOfReach);
         model.variables[buyVariable.name] = buyVariable;
     }
-    for(job of getJobAssignments()){
-        jobVariable = variableFromJobAssignment(job);
+    for(var job of getJobAssignments()){
+        var jobVariable = variableFromJobAssignment(job);
         model.variables[jobVariable.name] = jobVariable;
         model.ints[jobVariable.name] = true;
     }
-    for(race of getTradeableRaces()){
-        tradeVariable = variableFromTrade(race);
+    for(var race of getTradeableRaces()){
+        var tradeVariable = variableFromTrade(race);
         model.variables[tradeVariable.name] = tradeVariable;
         model.ints[tradeVariable.name] = true;
     }
-    for(craftBtn of getCrafts()){
-        craftVariable = variableFromCraft(craftBtn);
+    for(var craftBtn of getCrafts()){
+        var craftVariable = variableFromCraft(craftBtn, outOfReach);
         model.variables[craftVariable.name] = craftVariable;
     }
-    for(incrementableBld of getIncrementableBuildings()){
-        bldName = buttonId(incrementableBld);
-        bldNumVar = variableFromIncrementableBuilding(incrementableBld);
+    for(var incrementableBld of getIncrementableBuildings()){
+        var bldName = buttonId(incrementableBld);
+        var bldNumVar = variableFromIncrementableBuilding(incrementableBld);
         model.variables[bldNumVar.name] = bldNumVar;
         model.constraints[bldName] = { max: incrementableBld.val };
     }
-    for(res of game.resPool.resources) {
+    for(var res of game.resPool.resources) {
         if(res.name == "catnip"){
             var emergencyNip = reservedNipAmount();
             model.constraints[res.name] = {
@@ -253,7 +252,6 @@ function buildModel() {
 //#endregion Plan
 
 //#region Buyables
-var buyableLog = woodman.getLogger("main.buyable");
 function getBuyables(feasible = true) {
     //console.time("getBuyables");
     // console.time("bldTab.render");
@@ -294,6 +292,7 @@ function getBuyables(feasible = true) {
 }
 
 function variableFromButton(btn, outOfReach){
+    //buyableLog.log(btn, outOfReach);
     variable = {
         name: "Build|" + buttonId(btn),
         utility: buttonUtility(btn, outOfReach)
@@ -312,15 +311,18 @@ function buttonUtility(btn, outOfReach = null){
     var utility = 0;
     // Never or almost never useful. We hopefuly aren't going to hover max resources with this script.
     if(id == "factoryAutomation")
-        utility = 0.1;
+        utility = 0.1;   
+    // In game description is accurate.
+    else if (id == "socialism")
+        utility = 0.0001;
     // Faith upgrades are pretty important, as are science and workshop.
     // Incentivise them as they tend to look expensive to the optimiser.
     else if(btn.model.prices.find(p => p.name == "faith"))
-        utility = 4;
+        utility = 5;
     else if(btn.tab && btn.tab.tabId == "Science")
-        utility = 10;
+        utility = 15;
     else if(btn.tab && btn.tab.tabId == "Workshop")
-        utility = 8;
+        utility = 12;
     // Embassies have diminishing returns.
     else if(btn.race){
         // TODO: Should Embassy returns be based somewhat on unlocks?
@@ -350,23 +352,7 @@ function buttonUtility(btn, outOfReach = null){
         //buyableLog.log("%s: Have %i Discounted utility: %f", id, builtAlready, utility.toFixed(4));
         // Storage buildings are more useful than they appear naively, beacause we want to push up the tech tree for example.
         if(outOfReach && Object.keys(btn.model.metadata.effects).find(e => e.endsWith("Max")) ){
-            //buyableLog.debug("Evaluating extra utility for storage on object %s", buttonId(btn))
-            for(var infeasible of outOfReach){
-                for(var price of infeasible.model.prices){
-                    var resource = game.resPool.get(price.name);
-                    if( resource.maxValue < price.val ){
-                        var extraCap = price.val - resource.maxValue;
-                        var capIncrease = btn.model.metadata.effects[resource.name + "Max"] || 0;
-                        var percentOfRequired = Math.min(capIncrease / extraCap, 1);
-                        if(percentOfRequired > 0){
-                            var infeasibleUtility = buttonUtility(infeasible) / 10;
-                            var extraUtility = infeasibleUtility * percentOfRequired;
-                            //buyableLog.log("%s: Contributes to %s (utility %f) for %f extra utility. Current utility %f", id, buttonId(infeasible), infeasibleUtility.toFixed(4), extraUtility.toFixed(4), utility.toFixed(4))
-                            utility += extraUtility;
-                        }
-                    }
-                }
-            }
+            utility += utilityForSorageCap(outOfReach, btn.model.metadata.effects);
         }
     }
     else {
@@ -377,6 +363,27 @@ function buttonUtility(btn, outOfReach = null){
     //buyableLog.log("%s: Final utility including jitter %s", id, utility.toFixed(4))
     //if(outOfReach)
         // console.timeEnd("buttonUtility")
+    return utility;
+}
+
+function utilityForSorageCap(outOfReach, effects){
+    var utility = 0;
+    for(var infeasible of outOfReach){
+        for(var price of infeasible.model.prices){
+            var resource = game.resPool.get(price.name);
+            if( resource.maxValue < price.val ){
+                var extraCap = price.val - resource.maxValue;
+                var capIncrease = effects[resource.name + "Max"] || 0;
+                var percentOfRequired = Math.min(capIncrease / extraCap, 1);
+                if(percentOfRequired > 0){
+                    var infeasibleUtility = buttonUtility(infeasible) / 10;
+                    var extraUtility = infeasibleUtility * percentOfRequired;
+                    //buyableLog.log("%s: Contributes to %s (utility %f) for %f extra utility. Current utility %f", id, buttonId(infeasible), infeasibleUtility.toFixed(4), extraUtility.toFixed(4), utility.toFixed(4))
+                    utility += extraUtility;
+                }
+            }
+        }
+    }
     return utility;
 }
 
@@ -420,7 +427,6 @@ Make sure a minimum number of kittens can farm if we project that nip will fall 
 */
 
 function reserveFarmers(){
-    //var jobLog = woodman.getLogger("main.Jobs");
     var farmerJob = gamePage.village.getJob('farmer');
     if(!farmerJob.unlocked)
         return 0; // Can't reserver a farmer if it's not unlocked.
@@ -484,7 +490,6 @@ function jobResourcesMaxed(job){
 }
 
 function assignJobs(){
-    var jobLog = woodman.getLogger("main.Jobs");
     var jobNumbers = {assignments: {}, invalidJobs: []};
     var kittensAssigned = 0;
     var jobs = getJobAssignments();
@@ -608,9 +613,9 @@ function variableFromTrade(tradeRace) {
     var failureChance = tradeRace.standing < 0 ? -(tradeRace.standing + standingRatio) / 2 : 0;
     var bonusTradeChance = tradeRace.standing > 0 ? tradeRace.standing + standingRatio / 2 : 0;
     var tradeRatio = 1 + bonusForLeaderSwitch + game.diplomacy.getTradeRatio() + game.diplomacy.calculateTradeBonusFromPolicies(tradeRace.name, game) + game.challenges.getChallenge("pacifism").getTradeBonusEffect(game);
-    var raceRatio = 1 + race.energy * 0.02;
-    var currentSeason = this.game.calendar.getCurSeason().name;
-    var embassyEffect = this.game.ironWill ? 0.0025 : 0.01;
+    var raceRatio = 1 + tradeRace.energy * 0.02;
+    var currentSeason = game.calendar.getCurSeason().name;
+    var embassyEffect = game.ironWill ? 0.0025 : 0.01;
     
     
     for(sellResource of tradeRace.sells){
@@ -675,7 +680,6 @@ function variableFromTrade(tradeRace) {
 }
 
 function executeTrades(){
-    //var craftLog = woodman.getLogger("main.Craft");
     for(tradeable in plan) {
         if(!tradeable.startsWith("Trade")){
             continue;
@@ -710,7 +714,6 @@ function executeTrades(){
 
 //#region Crafts
 
-var craftLog = woodman.getLogger("main.Craft");
 function getCrafts(){
     if(gamePage.workshopTab.visible)
         return gamePage.workshopTab.craftBtns.filter(b => b.model.visible && isFeasible(b));
@@ -718,14 +721,16 @@ function getCrafts(){
         return [gamePage.bldTab.children.find(btn => btn.model.name == "Refine catnip")];
 }
 
-function variableFromCraft(c){
+function variableFromCraft(c, outOfReach){
+    //craftLog.log(c, outOfReach);
     craft = c.craftName || 'wood'
     cv = {
         name: "Craft|" + craft
     };
-    // TODO: If current manager has trait then effect is already factored in so needs to be removed.
-    cv[craft] = -1 * (1 + game.getResCraftRatio(craft) + craftBonusForLeaderSwitch(craft) - currentLeaderCraftBonus(craft))
-    for(price of c.model.prices){
+    var craftAmt = (1 + game.getResCraftRatio(craft) + craftBonusForLeaderSwitch(craft) - currentLeaderCraftBonus(craft))
+    cv[craft] = -craftAmt;
+    var craftPrices = game.workshop.getCraftPrice(c.model);
+    for(price of craftPrices){
         cv[price.name] = price.val;
     }
     if(craft == "wood" && game.bld.buildingsData.find(b => b.name == 'hut').val < 1){
@@ -744,17 +749,61 @@ function variableFromCraft(c){
         var builtAlready = game.resPool.get("ship").value;
         cv.utility = baseutility - game.getLimitedDR(builtAlready, baseutility);
     } 
-    /*
     // Manuscript max culture bonus (and may incentivize early temple)
-    else if (craft == "manuscript") {
-        cv.utility = 0.005 / game.resPool.get(craft).value
-    } 
-    // compendium max science bonus, nice typo in the craft name BTW
+    // TODO: Because we incentivise hunting for luxuries, we can get stuck in a loop where we hunt then convert everything to manuscripts for a tiny bump in utility. Then need to hunt again. How to fix this???
+    // else if (craft == "manuscript") {
+    //     cv.utility = manuscriptUtility(outOfReach) * craftAmt;
+    // } 
+    // compendium max science bonus minus penalty for losing manuscripts
+    // nice typo in the craft name BTW
     else if (craft == "compedium") {
-        cv.utility = 0.005 / game.resPool.get(craft).value
+        cv.utility = compendiumUtility(outOfReach, craftPrices, craftAmt);
     }
-    */
+    // blueprints lose compendia :-(
+    else if (craft == "blueprint") {
+        cv.utility = blueprintUtility(outOfReach, craftPrices);
+    }
     return cv;
+}
+
+function blueprintUtility(outOfReach, craftPrices){
+    return -1 * compendiumScienceUtility(outOfReach) * craftPrices.find(cp => cp.name == "compedium").val;
+}
+
+function compendiumScienceUtility(outOfReach){
+    // Workshop.js ~line 2592
+    var scienceMaxCap = game.bld.getEffect("scienceMax");
+    scienceMaxCap += game.getEffect("pyramidSpaceCompendiumRatio") * game.space.getEffect("scienceMax"); //lets treat trasnfered science max from space same way
+    if (game.ironWill) {
+        scienceMaxCap *= 10;
+    }
+    if (game.prestige.getPerk("codexLeviathanianus").researched) {
+        var blackLibrary = game.religion.getTU("blackLibrary");
+        var ttBoostRatio = 1 + blackLibrary.val * (blackLibrary.effects["compendiaTTBoostRatio"] + game.getEffect("blackLibraryBonus"));
+        scienceMaxCap *= 1 + 0.05 * ttBoostRatio * this.game.religion.transcendenceTier;
+    }
+    scienceMaxCap += game.bld.getEffect("scienceMaxCompendia");
+    var compendiaScienceMax = Math.floor(this.game.resPool.get("compedium").value * 10);
+
+    // If we haven't capped max science bonus from compendia then we can incentivise making them based on increasing science storage.
+    return compendiaScienceMax < scienceMaxCap ? utilityForSorageCap(outOfReach, {scienceMax: 10}) : 0;
+}
+
+function compendiumUtility(outOfReach, craftPrices, craftAmt){
+    var scienceUtility = compendiumScienceUtility(outOfReach);
+    var manuscriptUtilityLost = manuscriptUtility(outOfReach) * craftPrices.find(cp => cp.name == "manuscript").val;
+    //craftLog.log("scienceUtility %f, manuscriptUtilityLost %f", scienceUtility.toFixed(4), manuscriptUtilityLost.toFixed(4));
+    return (scienceUtility * craftAmt) - manuscriptUtilityLost;
+}
+
+function manuscriptUtility(outOfReach){
+        // Workshop.js ~line 2611
+		var cultureBonusRaw = Math.floor(game.resPool.get("manuscript").value);
+        var additionalMaxCultureFromManuscript = game.getUnlimitedDR(cultureBonusRaw + 1, 0.01) - game.getUnlimitedDR(cultureBonusRaw, 0.01);
+        additionalMaxCultureFromManuscript *= 1 + game.getEffect("cultureFromManuscripts");
+        var utility = utilityForSorageCap(outOfReach, {cultureMax: additionalMaxCultureFromManuscript});
+        //craftLog.log("additionalMaxCultureFromManuscript %f, utility %f", additionalMaxCultureFromManuscript.toFixed(1), utility.toFixed(4));
+        return utility;
 }
 
 function executeCrafts(){
@@ -1167,7 +1216,12 @@ function includeLoglevel() {
            // TODO: This line doesn't actually init the logger. woodman.load('console') needs to be called manually :-(
            woodman.load('console');
            window.logger = woodman.getLogger('main');
-           logger.level = "warn";
+           window.leaderLog = woodman.getLogger("main.Leader");
+           window.faithLog = woodman.getLogger("main.faith");
+           window.execLog = woodman.getLogger("main.Execution");
+           window.buyableLog = woodman.getLogger("main.buyable");
+           window.jobLog = woodman.getLogger("main.Jobs");
+           window.craftLog = woodman.getLogger("main.Craft");
            logger.log("woodman downloaded and executed");
         }
     };
@@ -1378,7 +1432,6 @@ function promoteUnderPlan(){
 }
 
 function switchLeaderToBuy(btn){
-    var leaderLog = woodman.getLogger("main.Leader");
     if(btn.model.prices.find(p => p.name == "faith")){
         return doLeaderChangeTrait("wise")
     }
@@ -1397,7 +1450,6 @@ function desiredTraitToBuy(btn){
 }
 
 function canSwapLeaderToPurchase(btn, feasibilityStudy = true){
-    var leaderLog = woodman.getLogger("main.Leader");
     var limitingFactors = limitedResources(btn);
     if(limitingFactors.length == 0)
         return null;
@@ -1492,7 +1544,6 @@ function leaderDiscountRatio(btn, resName){
 function variableForPraiseSun(){
     if(!gamePage.religionTab.visible)
         return null;
-    //var faithLog = woodman.getLogger("main.faith");
     gamePage.religionTab.render();
     var halfFaith = game.resPool.get("faith").maxValue / 2;
     var additionalWorship = halfFaith * (1 + game.religion.getApocryphaBonus());
@@ -1540,7 +1591,6 @@ function praiseUnderPlan(){
     var praisesAvailable = faithAmount / halfFaith;
     //console.log("praiseToDo: %i, faithAmount: %i, halfFaith: %i, praisesAvailable: %i", praiseToDo, faithAmount, halfFaith, praisesAvailable);
     if(praisesAvailable > 1){
-        var faithLog = woodman.getLogger("main.faith");
         faithLog.info("About to paise %i ", praisesAvailable);
         gamePage.religionTab.praiseBtn.buttonContent.click();
         executedPlan.PraiseTheSun = (executedPlan.PraiseTheSun || 0) + praisesAvailable;
@@ -1579,7 +1629,6 @@ function sacrificeUnderPlan(){
     if(sacsToDo <= 0)
         return;
     for(var i = 0; i < sacsToDo; i++){
-        var faithLog = woodman.getLogger("main.faith");
         faithLog.info("I will bathe in unicorn tears!");
         gamePage.religionTab.sacrificeBtn.buttonContent.click()
     }
@@ -1601,6 +1650,18 @@ function buttonId(btn){
     if(btn.opts.id)
         return btn.opts.id;
     return btn.opts.name;
+}
+
+function plannedUtilities(){
+    var pu = [];
+    for(var planItem in plan){
+        logger.log(planItem)
+        if(model.variables[planItem] && model.variables[planItem].utility){
+            logger.log(plan[planItem])
+            pu.push({name: planItem, utilityPerItem: model.variables[planItem].utility, totalUtility: model.variables[planItem].utility * plan[planItem]});
+        }
+    }
+    return pu;
 }
 
 //#endregion Utilities

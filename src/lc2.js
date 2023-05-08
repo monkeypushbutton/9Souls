@@ -1,7 +1,6 @@
 // TODO: Kittens massacre in year 1 due to building too many huts. Sad but not a deal breaker.
 // TODO: UI often doesn't refresh after script takes an action. Smelters going on and off are a case in point.
 // TODO: LP Still wants to assign kittens to e.g. scientist when resource is at max at certain points. I'm manually correcting for it right now, which sucks.
-// TODO: Tabs havre to be visited before buttons etc are rendered to Dom to be able to be clicked. Script should ensure that available tabs have been rendered.
 // TODO: Add variable and implementation for steamworks on vs off. I have a hunch that off with be the right choice 95% of time at least until magnetos.
 
 // NB: Season is ~ 200 seconds long. 
@@ -21,6 +20,7 @@ var eventLoops = {
 function go() {
     // Important to not stall when choosing a policy upgrade.
     game.opts.noConfirm = true;
+    ensureTabsRendered();
     restartExecLoop();
 }
 
@@ -59,6 +59,17 @@ function restartExecLoop(){
     stopLoop('execHandle');
     executePlanNow();
     eventLoops.execHandle = setInterval(executePlanNow, executeIntervalSeconds * 1000);
+}
+
+function ensureTabsRendered(){
+    gamePage.villageTab.render();
+    gamePage.libraryTab.render();
+    gamePage.workshopTab.render();
+    gamePage.bldTab.render();
+    gamePage.diplomacyTab.render();
+    gamePage.religionTab.render();
+    gamePage.spaceTab.render();
+    gamePage.timeTab.render();
 }
 
 //#endregion

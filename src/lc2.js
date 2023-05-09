@@ -247,9 +247,12 @@ function buildModel() {
     var promoteVariable = variableForPromoteLeader();
     if(promoteVariable)
         model.variables[promoteVariable.name] = promoteVariable;
-    var huntVariable = variableFromHunt();
-    if(huntVariable)
+    for(var huntVariable of variableFromHunt()) {
         model.variables[huntVariable.name] = huntVariable;
+        if(huntVariable.huntForLuxury){
+            model.constraints.huntForLuxury = {max: huntVariable.huntForLuxuryMax};
+        }
+    }
     var exploreVar = variableFromExplore();
     if(exploreVar){
         model.constraints[exploreVar.name] = {min: 0, max: 1}
@@ -769,10 +772,9 @@ function variableFromCraft(c, outOfReach){
         cv.utility = baseutility - game.getLimitedDR(builtAlready, baseutility);
     } 
     // Manuscript max culture bonus (and may incentivize early temple)
-    // TODO: Because we incentivise hunting for luxuries, we can get stuck in a loop where we hunt then convert everything to manuscripts for a tiny bump in utility. Then need to hunt again. How to fix this???
-    // else if (craft == "manuscript") {
-    //     cv.utility = manuscriptUtility(outOfReach) * craftAmt;
-    // } 
+    else if (craft == "manuscript") {
+        cv.utility = manuscriptUtility(outOfReach) * craftAmt;
+    } 
     // compendium max science bonus minus penalty for losing manuscripts
     // nice typo in the craft name BTW
     else if (craft == "compedium") {
@@ -924,7 +926,7 @@ function executeExplore() {
 
 function variableFromHunt(){
     if(!gamePage.villageTab.visible || !gamePage.villageTab.huntBtn.model.visible)
-        return null;
+        return [];
     hunterRatio = game.getEffect("hunterRatio") + game.village.getEffectLeader("manager", 0);
     ivoryProb = (0.45 + 0.02 * hunterRatio) / 2;
     averageIvory = ivoryProb * (50 + (40 * hunterRatio));
@@ -937,38 +939,68 @@ function variableFromHunt(){
     ivoryCons = resoucePerTick(ivoryRes, 0, null);
 
     utilityForLux = 0
-    if(projectResourceAmount(furRes) <= -1 * furCons * game.ticksPerSecond * planHorizonSeconds())
+    var furDesiredToBuffer = -1 * furCons * game.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(furRes);
+    var huntsToFillFurBuffer = furDesiredToBuffer / averageFurs; 
+    if(furDesiredToBuffer > 0){
         utilityForLux += 0.05;
-    if(projectResourceAmount(ivoryRes) <= -1 * ivoryCons * game.ticksPerSecond * planHorizonSeconds())
+    }
+    var ivoryDesiredToBuffer = -1 * ivoryCons * game.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(ivoryRes);
+    var huntsToFillIvoryBuffer = ivoryDesiredToBuffer / averageIvory;
+    if(ivoryDesiredToBuffer > 0){
         utilityForLux += 0.05;
-    // Sooo sparkly
+    }
+    // Sooo sparkly.
     unicornResource = game.resPool.get('unicorns');
-    if(unicornResource.value == 0)
-        utilityForLux += 0.5;
+    if(unicornResource.value == 0){
+        utilityForLux += 0.1;
+    }
 
-    return {
-        name: "Hunt",
+    var huntVar = {
+        name: "Hunt|ForResources",
         manpower: 100,
         unicorns: -0.05,
         ivory: -averageIvory,
         furs: -averageFurs,
-        utility: utilityForLux
     };
+
+    var huntVars = [huntVar];
+    if(utilityForLux > 0){
+        // craftLog.log("Hunt for luxury utility as follows, $s", {
+        //     furDesiredToBuffer: furDesiredToBuffer,
+        //     huntsToFillFurBuffer: huntsToFillFurBuffer,
+        //     ivoryDesiredToBuffer: ivoryDesiredToBuffer,
+        //     huntsToFillIvoryBuffer: huntsToFillIvoryBuffer,
+        //     unicorns: unicornResource.value > 0,
+        //     utilityForLux: utilityForLux
+        // });
+
+        huntVars.push({
+            name: "Hunt|ForLuxury",
+            manpower: 100,
+            unicorns: -0.05,
+            ivory: -averageIvory,
+            furs: -averageFurs,
+            huntForLuxury: 1,
+            huntForLuxuryMax: Math.ceil(Math.max(huntsToFillFurBuffer, huntsToFillIvoryBuffer, 1)),
+            utility: utilityForLux
+        });
+    }
+    return huntVars;
 }
 
 function executeHunts() {
-    desiredHunts = (plan["Hunt"] || 0);
+    if(!gamePage.villageTab.visible || !gamePage.villageTab.huntBtn.model.visible)
+        return;
+    desiredHunts = Math.ceil((plan["Hunt|ForResources"] || 0) + (plan["Hunt|ForLuxury"] || 0));
     executedHunts = executedPlan["Hunt"] || 0;
     desiredRemainingHunts = desiredHunts - executedHunts;
-    if(desiredHunts < 1)
-        return;
-    if(!gamePage.villageTab.visible || !gamePage.villageTab.huntBtn.model.visible)
+    if(desiredRemainingHunts < 1)
         return;
     possibleHuntsNow = Math.floor(game.resPool.get("manpower").value / 100);
     if(possibleHuntsNow < 1)
         return;
-    huntsToPerform = Math.min(desiredHunts, possibleHuntsNow)
-    // console.info("Hunting ", huntsToPerform, huntsToPerform == possibleHuntsNow ? "  (as many as possible)" : ""," times (", executedHunts + huntsToPerform, "/", desiredHunts ,")")
+    huntsToPerform = Math.min(desiredRemainingHunts, possibleHuntsNow)
+    craftLog.log("Hunting ", huntsToPerform, huntsToPerform == possibleHuntsNow ? "  (as many as possible)" : ""," times (", executedHunts + huntsToPerform, "/", desiredHunts ,")")
     if(huntsToPerform == possibleHuntsNow){
         gamePage.village.huntAll()
     } else {

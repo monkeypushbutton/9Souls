@@ -6,6 +6,7 @@
 // NB: Season is ~ 200 seconds long. 
 var executeIntervalSeconds = 20;
 var planHistory = 5;
+var purchaseHistory = 20;
 var plannedSeason = -1;
 var reservedFarmers = 0;
 var plannedKittens = 0;
@@ -131,6 +132,7 @@ var model;
 var executedPlan;
 var historicPlans = new CircularBuffer(planHistory);
 var historicModels = new CircularBuffer(planHistory);
+var historicExecution = new CircularBuffer(purchaseHistory);
 function planNow(){
     console.time("planNow");
     plannedSeason = gamePage.calendar.season;
@@ -140,7 +142,11 @@ function planNow(){
     historicModels.push(plan);
     plan = solver.Solve(model);
     historicPlans.push(plan);
-    executedPlan = {};
+    if(executedPlan){
+        executedPlan.validTo = new Date();
+        historicExecution.push(executedPlan);
+    }
+    executedPlan = {validFrom: new Date()};
     console.log(model);
     console.log(plan);
     console.timeEnd("planNow");
@@ -427,14 +433,15 @@ function buyUnderPlan(){
         if(canAffordNow(buyButton)){
             var prevLeader = switchLeaderToBuy(buyButton);
             console.log('Buying ' + label);
+            executedPlan[buyable] = 1;
             //console.debug(buyButton);
             //console.debug(buyButton.buttonContent);
-            window.setTimeout(() => {
-                if(buyButton.update)
-                    buyButton.update();
-                buyButton.buttonContent.click();
-                changeLeader(prevLeader);
-            }, 50);
+            //window.setTimeout(() => {
+            if(buyButton.update)
+                buyButton.update();
+            buyButton.buttonContent.click();
+            changeLeader(prevLeader);
+            //}, 50);
             bought = true;
         }
     }
@@ -606,6 +613,10 @@ function assignJobs(){
                 }
             }
         }
+    }
+    for(var jobName in jobNumbers.assignments) {
+        if(jobNumbers.assignments[jobName])
+            executedPlan["Job|" + jobName] = jobNumbers.assignments[jobName];
     }
     // TODO: Partial kittens
     // TODO: Optimise when required.
@@ -913,8 +924,8 @@ function executeExplore() {
     btn = gamePage.diplomacyTab.exploreBtn
     if(canAffordNow(gamePage.diplomacyTab.exploreBtn)){
         console.info("Exploring for new races!");
-        btn.buttonContent.click();
-        
+        btn.buttonContent.click();        
+        executedPlan.Explore = 1;        
         console.log("Replanning (explored)");
         planNow();
     }
@@ -1725,23 +1736,29 @@ function utilityProgress(btn){
 
 function CircularBuffer(length){
 
-    var pointer = 0, buffer = new Array(length); 
-  
+    var pointer = 0, buffer = new Array(length), itemsPushed = 0; 
+    
     return {
+      
       get  : function(key){return buffer[((pointer - 1) - key + length) % length];},
       push : function(item){
         buffer[pointer] = item;
         pointer = (length + pointer + 1) % length;
+        itemsPushed++;
       },
       toArray : function() {
         var retArray = [];
-        for(var idx = 0; idx < length; idx++){
+        for(var idx = 0; idx < Math.min(length, itemsPushed); idx++){
             retArray.push(this.get(idx));
         }
         return retArray;
       }
     };
   };
+
+function clone(obj){
+    return JSON.parse(JSON.stringify(obj));
+}
 
 //#endregion Utilities
 

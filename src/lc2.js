@@ -224,7 +224,7 @@ function buildModel() {
         model.ints[jobVariable.name] = true;
     }
     for(var race of getTradeableRaces()){
-        var tradeVariable = variableFromTrade(race);
+        var tradeVariable = variableFromTrade(race, outOfReach);
         model.variables[tradeVariable.name] = tradeVariable;
         model.ints[tradeVariable.name] = true;
     }
@@ -629,7 +629,7 @@ function getTradeableRaces() {
     return gamePage.diplomacy.races.filter(r => r.unlocked);
 }
 
-function variableFromTrade(tradeRace) {
+function variableFromTrade(tradeRace, outOfReach) {
     // TODO: Pretty sure I'm not doing tradeRatio correctly - is there a better way to simulate this as with production
     // diplomacy.tradeImpl, but without side effects?
     tv = {
@@ -650,7 +650,7 @@ function variableFromTrade(tradeRace) {
     var currentSeason = game.calendar.getCurSeason().name;
     var embassyEffect = game.ironWill ? 0.0025 : 0.01;
     
-    
+    var tradeUtility = 0;
     for(sellResource of tradeRace.sells){
         //console.debug(res, tradeRace, res.minLevel, tradeRace.embassyLevel)
         // Mostly cribbed from diplomacy.tradeImpl
@@ -692,6 +692,17 @@ function variableFromTrade(tradeRace) {
         reserved = sellResource.name == "catnip" ? reservedNipAmount() : 0;
         if(sellResource.maxValue)
             expected = Math.min(expected, sellResource.maxValue - reserved);
+
+
+        // Manuscript max culture bonus may influence trade utility
+        if (sellResource.name == "manuscript") {
+            tradeUtility += manuscriptUtility(outOfReach) * expected;;
+        } 
+        // compendium max science bonus may influence trade utility
+        else if (sellResource.name == "compedium") {
+            tradeUtility += compendiumScienceUtility(outOfReach) * expected;
+        }
+
         tv[sellResource.name] = -expected
     }
 
@@ -707,8 +718,10 @@ function variableFromTrade(tradeRace) {
     var spiceRes = game.resPool.get("spice");
     var spiceCons = resoucePerTick(spiceRes);
     if(projectResourceAmount(spiceRes) < -1 * spiceCons * game.ticksPerSecond * planHorizonSeconds()){
-        tv.utility = 0.05;
-    }    
+        tradeUtility += 0.05;
+    }
+    if(tradeUtility)
+        tv.utility = tradeUtility;
     return tv;
 }
 

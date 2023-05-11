@@ -6,11 +6,14 @@
 // NB: Season is ~ 200 seconds long. 
 var executeIntervalSeconds = 20;
 var planHistory = 5;
-var purchaseHistory = 20;
+var purchaseHistory = 50;
 var plannedSeason = -1;
 var reservedFarmers = 0;
 var plannedKittens = 0;
 var plannedButtons = [];
+
+// Give buildings diminishing returns for building more of them.
+var diminishingReturns = false;
 
 var eventLoops = {
     execHandle: undefined,
@@ -169,6 +172,9 @@ function limitedResources(btn){
     var limitedResources = []
     for(cost of btn.model.prices){
         var resMax = game.resPool.get(cost.name).maxValue
+        if(cost.name == "catnip"){
+            resMax -= reservedNipAmount();
+        }
         if(resMax && resMax < cost.val)
             limitedResources.push(cost)
     }
@@ -344,8 +350,13 @@ function buttonUtility(btn, outOfReach = null){
         utility = 0.0001;
     // Faith upgrades are pretty important, as are science and workshop.
     // Incentivise them as they tend to look expensive to the optimiser.
-    else if(btn.model.prices.find(p => p.name == "faith"))
-        utility = 5;
+    else if(btn.model.prices.find(p => p.name == "faith")){
+        if(id == "templars") {
+            utility = 1;
+        } else {
+            utility = 5;
+        }
+    }
     else if(btn.tab && btn.tab.tabId == "Science")
         utility = 15;
     else if(btn.tab && btn.tab.tabId == "Workshop")
@@ -353,15 +364,15 @@ function buttonUtility(btn, outOfReach = null){
     // Embassies have diminishing returns.
     else if(btn.race){
         // TODO: Should Embassy returns be based somewhat on unlocks?
-        var baseutility = 1.5;
-        var builtAlready = btn.model.metadata.val;
-        utility = baseutility - game.getLimitedDR(builtAlready, baseutility);
+        var baseutility = 0.75;
+        var builtAlready = btn.model.metadata.val;        
+        utility = baseutility - (diminishingReturns ? game.getLimitedDR(builtAlready, baseutility) : 0);
     }
     else if(gamePage.bld.buildingsData.find(bd => bd.name == id)) {
-        var baseutility = 2;
+        var baseutility = 1;
         // Buildings I hope??
         if(id == 'workshop')
-            baseutility = 5;
+            baseutility = 3;
         // Hunting is just more a straight up more efficient use of manpower.
         else if(id == "mint")
             baseutility = 0.2;
@@ -371,11 +382,11 @@ function buttonUtility(btn, outOfReach = null){
             baseutility = magnetos == 0 ? 0.2 : 1;
         }
         else if(gamePage.bld.buildingGroups.find(bg => bg.name == "population").buildings.includes(id))
-            baseutility =  6;
+            baseutility = 3;
         //buyableLog.log("%s: Base utility: %f", id, baseutility.toFixed(4));
         // Give them diminishing returns to incentivise climbing the tech tree faster.
         var builtAlready = btn.model.metadata.val
-        utility = baseutility - game.getLimitedDR(builtAlready, baseutility);
+        utility = baseutility - (diminishingReturns ? game.getLimitedDR(builtAlready, baseutility) : 0);
         //buyableLog.log("%s: Have %i Discounted utility: %f", id, builtAlready, utility.toFixed(4));
         // Storage buildings are more useful than they appear naively, beacause we want to push up the tech tree for example.
         if(outOfReach && Object.keys(btn.model.metadata.effects).find(e => e.endsWith("Max")) ){
@@ -789,11 +800,13 @@ function variableFromCraft(c, outOfReach){
             cv.utility = 0.01;
         }
     }
-    // Ships are good ;-)
+    // Ships are good, up to a point ;-)
     else if(craft == "ship"){
-        var baseutility = 5;
         var builtAlready = game.resPool.get("ship").value;
-        cv.utility = baseutility - game.getLimitedDR(builtAlready, baseutility);
+        var baseutility = builtAlready > 150 ? 2 : 0;
+        // 100 trade ships = spiders.
+        var utilityDivider = builtAlready > 100 ? (builtAlready - 100) : 1;
+        cv.utility = baseutility / utilityDivider;
     } 
     // Manuscript max culture bonus (and may incentivize early temple)
     else if (craft == "manuscript") {
@@ -1242,12 +1255,30 @@ function evaluateProductionStack(stack, resource, mode, modeVariable){
 function projectResourceAmount(res) {
     var baseProduction = resoucePerTick(res, 0, null);
     var projected = res.value + (baseProduction * gamePage.ticksPerSecond * planHorizonSeconds());
+    var timeRatioBonus = 1 + game.getEffect("timeRatio") * 0.25;
+    var chanceRatio = (game.prestige.getPerk("chronomancy").researched ? 1.1 : 1) * timeRatioBonus;
+    if(res.name == "science"){
+        // Astro events.
+        var eventChance = (0.0025 + game.getEffect("starEventChance")) * chanceRatio;
+        if (this.game.prestige.getPerk("astromancy").researched) {
+            eventChance *= 2;
+        }
+        // Evaluated once per day.
+        var astroEventsExpected = eventChance * planHorizonSeconds() / 2;
+        var celestialBonus = game.workshop.get("celestialMechanics").researched
+            ? (game.ironWill ? 1.6 : 1.2)
+            : 1;
+        var sciBonus = 25 * celestialBonus * (1 + this.game.getEffect("scienceRatio"));
+        // starchart bonus
+        sciBonus *= Math.max(1, eventChance);
+        projected += astroEventsExpected * sciBonus;
+    }
     if(projected < 0)
         return 0;
     if(res.maxValue)
-        return Math.min(projected, res.maxValue)
+        return Math.min(projected, res.maxValue);
     else    
-        return projected
+        return projected;
 }
 
 // Reserve one season of nip
@@ -1733,9 +1764,14 @@ function plannedUtilities(){
         //logger.log(planItem)
         if(model.variables[planItem] && model.variables[planItem].utility){
             //logger.log(plan[planItem])
-            pu.push({name: planItem, utilityPerItem: model.variables[planItem].utility, quantity: plan[planItem], totalUtility: model.variables[planItem].utility * plan[planItem]});
+            pu.push({
+                name: planItem, 
+                utilityPerItem: model.variables[planItem].utility.toFixed(2), 
+                quantity: plan[planItem].toFixed(2), 
+                totalUtility: (model.variables[planItem].utility * plan[planItem]).toFixed(2)});
         }
     }
+    pu.sort(function(a, b){return b.quantity-a.quantity});
     return pu;
 }
 
@@ -1745,6 +1781,19 @@ function utilityProgress(btn){
         hist.push((plan[btn] || 0).toFixed(2));
     }
     return hist;
+}
+
+function mostRecentPurchases(){
+    var purchases = [];
+    for(var eh of historicExecution.toArray()){
+        if(eh){
+            for(var item in eh){
+                if(item.startsWith("Build|"))
+                    purchases.push({time: eh.validTo.toLocaleTimeString(), item: item});
+            }
+        }
+    }
+    return purchases;
 }
 
 function CircularBuffer(length){

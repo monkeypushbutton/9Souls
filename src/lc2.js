@@ -2,6 +2,7 @@
 // TODO: UI often doesn't refresh after script takes an action. Smelters going on and off are a case in point.
 // TODO: LP Still wants to assign kittens to e.g. scientist when resource is at max at certain points. I'm manually correcting for it right now, which sucks.
 // TODO: Add variable and implementation for steamworks on vs off. I have a hunch that off with be the right choice 95% of time at least until magnetos.
+// TODO: Festivals
 
 // NB: Season is ~ 200 seconds long. 
 var executeIntervalSeconds = 20;
@@ -10,6 +11,10 @@ var purchaseHistory = 50;
 var plannedSeason = -1;
 var reservedFarmers = 0;
 var plannedKittens = 0;
+// How much utility is 1% of happiness worth?
+var happinessUtility = 0.05;
+// How much utility is 1% production bonus worth (magneto, solarRevolution, steamworks)
+var globalProductionUtility = 3;
 var plannedButtons = [];
 
 // Give buildings diminishing returns for building more of them.
@@ -81,7 +86,7 @@ function ensureTabsRendered(){
 //#region Execution
 
 function executePlanNow(timesBought = 0){
-    //execLog.log("Executing");
+    execLog.log("Executing");
     praiseUnderPlan();
     if(gamePage.calendar.season != plannedSeason){
         execLog.log("Replanning (season)");
@@ -106,6 +111,7 @@ function executePlanNow(timesBought = 0){
     executeTrades();
     executeCrafts();
     assignJobs();
+    executeIncrementableBuilding();
     executeToggleBuildings();
     sacrificeUnderPlan();
     var bought = false;
@@ -120,9 +126,9 @@ function executePlanNow(timesBought = 0){
     }
 }
 
-function observeTheSky(){
+function observeTheSky(){    
     if(gamePage.calendar.observeBtn){
-        console.debug("Observing...")
+        execLog.info("Observing...")
         gamePage.calendar.observeBtn.click();
     }
 }
@@ -137,22 +143,23 @@ var historicPlans = new CircularBuffer(planHistory);
 var historicModels = new CircularBuffer(planHistory);
 var historicExecution = new CircularBuffer(purchaseHistory);
 function planNow(){
-    console.time("planNow");
     plannedSeason = gamePage.calendar.season;
     plannedButtons = getBuyables();
     plannedKittens = game.resPool.get("kittens").value;
     model = buildModel();
     historicModels.push(plan);
+    const timeEnterSolve = performance.now();
     plan = solver.Solve(model);
+    const timeExitSolve = performance.now();
+    logger.log("%s took %ims", "solver.Solve", timeExitSolve - timeEnterSolve);
     historicPlans.push(plan);
     if(executedPlan){
         executedPlan.validTo = new Date();
         historicExecution.push(executedPlan);
     }
     executedPlan = {validFrom: new Date()};
-    console.log(model);
-    console.log(plan);
-    console.timeEnd("planNow");
+    logger.info(model);
+    logger.info(plan);
 }
 
 function planHorizonSeconds(){
@@ -211,6 +218,7 @@ function canAffordHowManyNow(btn){
 }
 
 function buildModel() {
+    const timeEnter = performance.now();
     // TODO: Build a model with steamworks on or off. Plan twice and execute plan with best utility.
     model = {
         optimize: "utility",
@@ -243,6 +251,12 @@ function buildModel() {
         var bldNumVar = variableFromIncrementableBuilding(incrementableBld);
         model.variables[bldNumVar.name] = bldNumVar;
         model.constraints[bldName] = { max: incrementableBld.val };
+    }
+    for(var toggleBld of getToggleableBuildings()){
+        var bldName = buttonId(toggleBld);
+        var bldNumVar = variableFromToggleableBuilding(toggleBld);
+        model.variables[bldNumVar.name] = bldNumVar;
+        model.constraints[bldName] = { max: 1 };
     }
     for(var res of game.resPool.resources) {
         if(res.name == "catnip"){
@@ -280,6 +294,8 @@ function buildModel() {
     }
     reservedFarmers = reserveFarmers();
     model.constraints.kittens.max -= reservedFarmers;
+    const timeExit = performance.now();
+    logger.log("%s took %ims", "buildModel", timeExit - timeEnter);
     return model;
 }
 //#endregion Plan
@@ -326,7 +342,7 @@ function getBuyables(feasible = true) {
 
 function variableFromButton(btn, outOfReach){
     //buyableLog.log(btn, outOfReach);
-    variable = {
+    const variable = {
         name: "Build|" + buttonId(btn),
         utility: buttonUtility(btn, outOfReach)
     }
@@ -336,53 +352,75 @@ function variableFromButton(btn, outOfReach){
     return variable;
 }
 
-function buttonUtility(btn, outOfReach = null){
-    // if(outOfReach)
-    //     console.time("buttonUtility")
-    // Some buildings are just really good and some are real stinkers in the context of this script.
-    var id = buttonId(btn)
-    var utility = 0;
-    // Never or almost never useful. We hopefuly aren't going to hover max resources with this script.
-    if(id == "factoryAutomation")
-        utility = 0.1;   
+// Some buildings are just really good and some are real stinkers in the context of this script.
+var baseUtilityMap = {
+    // Workshop
+    factoryAutomation: 0.1,
+    // Science
     // In game description is accurate.
-    else if (id == "socialism")
-        utility = 0.0001;
+    socialism: 0.0001,
+    // Faith
+    templars: 1,
+    ivoryTower: 6,
+    // Bonfire
+    workshop: 3,
+        // Pop
+    hut: 5,
+    logHouse: 2.5,
+    mansion: 2.5,
+        // Storage
+        // Additional storage not that useful. We hopefuly aren't going to hover max resources with this script.
+    barn: 0.5,
+    warehouse: 0.5,
+    // Hunting is just more a straight up more efficient use of manpower.
+    mint: 0.2,
+        // Production
+    magneto: 2,
+    smelter: 1.5,
+    unicornPasture: 0.5
+};
+
+function buttonUtility(btn, outOfReach = null){
+    const timeEnter = performance.now();
+    var id = buttonId(btn)
+    var utility = 1;
     // Faith upgrades are pretty important, as are science and workshop.
     // Incentivise them as they tend to look expensive to the optimiser.
-    else if(btn.model.prices.find(p => p.name == "faith")){
-        if(id == "templars") {
-            utility = 1;
-        } else {
-            utility = 5;
-        }
-    }
+    var mappedUtility = baseUtilityMap[id];
+    if(btn.model.prices.find(p => p.name == "faith"))
+        utility = mappedUtility || 5;
     else if(btn.tab && btn.tab.tabId == "Science")
-        utility = 15;
+        utility = mappedUtility || 15;
     else if(btn.tab && btn.tab.tabId == "Workshop")
-        utility = 12;
+        utility = mappedUtility || 12;
     // Embassies have diminishing returns.
     else if(btn.race){
         // TODO: Should Embassy returns be based somewhat on unlocks?
-        var baseutility = 0.75;
+        var baseutility = mappedUtility || 0.75;
         var builtAlready = btn.model.metadata.val;        
         utility = baseutility - (diminishingReturns ? game.getLimitedDR(builtAlready, baseutility) : 0);
     }
     else if(gamePage.bld.buildingsData.find(bd => bd.name == id)) {
-        var baseutility = 1;
-        // Buildings I hope??
-        if(id == 'workshop')
-            baseutility = 3;
-        // Hunting is just more a straight up more efficient use of manpower.
-        else if(id == "mint")
-            baseutility = 0.2;
-        else if(id == "steamworks"){
+        var baseutility = mappedUtility || 1;
+        if(id == "steamworks"){
             // Steamworks are pretty bad before megneto (I think)
             var magnetos = gamePage.bld.get("magneto").val
             baseutility = magnetos == 0 ? 0.2 : 1;
         }
-        else if(gamePage.bld.buildingGroups.find(bg => bg.name == "population").buildings.includes(id))
-            baseutility = 3;
+        else if (id == "oilWell") {
+            //logger.log(id);
+            var oil = game.resPool.get("oil");
+            if(oil.value == oil.maxValue){
+                baseutility = 0.5;
+                //logger.log("Penalty for produced resource maxxed.", id, baseutility);
+            }
+        }
+        // already not using all of building x, disincentivise
+        if(btn.model.metadata.val > btn.model.metadata.on){
+            baseutility = baseutility / 2;
+            //logger.log("Penalty for not all in use.", id, baseutility);
+        }
+            
         //buyableLog.log("%s: Base utility: %f", id, baseutility.toFixed(4));
         // Give them diminishing returns to incentivise climbing the tech tree faster.
         var builtAlready = btn.model.metadata.val
@@ -391,17 +429,40 @@ function buttonUtility(btn, outOfReach = null){
         // Storage buildings are more useful than they appear naively, beacause we want to push up the tech tree for example.
         if(outOfReach && Object.keys(btn.model.metadata.effects).find(e => e.endsWith("Max")) ){
             utility += utilityForSorageCap(outOfReach, btn.model.metadata.effects);
+            //logger.log(id, utility);
         }
-    }
-    else {
-        utility = 1;
+        //logger.log(id, utility);
     }
     // Jittery
     utility = utility * (1 + Math.random() / 10);
     //buyableLog.log("%s: Final utility including jitter %s", id, utility.toFixed(4))
     //if(outOfReach)
         // console.timeEnd("buttonUtility")
+    const timeExit = performance.now();
+    //buyableLog.log("buttonUtility took %i ms", timeExit - timeEnter);
     return utility;
+}
+
+// Work in progress
+function allProductionMaxxed(model){
+    if(!model)
+        return false;
+    if(!model.metadata)
+        return false;
+    if(!model.metadata.effects)
+        return false;
+    var productionEffects = Object.keys(model.metadata.effects).filter(e => e.endsWith("PerTickBase") && model.metadata.effects[e] > 0);
+    if(productionEffects.length == 0)
+        return false;
+
+    for(var eff of productionEffects)
+    {
+        var resName = eff.substring(0, eff.indexOf("PerTickBase"));
+        var res = game.resPool.get(resName);
+        if(res.value < res.maxValue)
+            return false;
+    }
+    return true;    
 }
 
 function utilityForSorageCap(outOfReach, effects){
@@ -510,7 +571,6 @@ function variableFromJobAssignment(j) {
     if(j.name == "miner" && !gamePage.bld.get("workshop").unlocked){
         jv.utility = 1;
     }
-    // TODO: Moderate the benefits of the priesthood.
     else if (j.name == "priest"){
         if(!gamePage.religionTab.visible){
             // Yeah - we should unlock that ;-)
@@ -530,6 +590,7 @@ function jobResourcesMaxed(job){
 }
 
 function assignJobs(){
+    const timeEnter = performance.now();
     var jobNumbers = {assignments: {}, invalidJobs: []};
     var kittensAssigned = 0;
     var jobs = getJobAssignments();
@@ -539,7 +600,7 @@ function assignJobs(){
         if(j.name == "farmer")
             numPlanned += reservedFarmers;
         // Remove assignments from maxxed out jobs.
-        if(numPlanned != 0 && jobResourcesMaxed(j)){
+        if(jobResourcesMaxed(j)){
             //jobLog.log("Waste detection for kittens doing ", j.name , " all kittens doing this will be reallocated.");
             numPlanned = 0;
             jobNumbers.invalidJobs.push(j.name)
@@ -629,6 +690,8 @@ function assignJobs(){
         if(jobNumbers.assignments[jobName])
             executedPlan["Job|" + jobName] = jobNumbers.assignments[jobName];
     }
+    const timeExit = performance.now();
+    jobLog.log("assignJobs took %i ms", timeExit - timeEnter);
     // TODO: Partial kittens
     // TODO: Optimise when required.
 }
@@ -803,9 +866,9 @@ function variableFromCraft(c, outOfReach){
     // Ships are good, up to a point ;-)
     else if(craft == "ship"){
         var builtAlready = game.resPool.get("ship").value;
-        var baseutility = builtAlready > 150 ? 2 : 0;
+        var baseutility = builtAlready < 200 ? 2 : 0;
         // 100 trade ships = spiders.
-        var utilityDivider = builtAlready > 100 ? (builtAlready - 100) : 1;
+        var utilityDivider = builtAlready > 125 ? (builtAlready - 125) : 1;
         cv.utility = baseutility / utilityDivider;
     } 
     // Manuscript max culture bonus (and may incentivize early temple)
@@ -889,7 +952,7 @@ function executeCrafts(){
             continue;
         
         var oldLeader = switchLeaderToCraft(craftName);
-        craftLog.info("Crafting %i %s (%i/%f)", numToActuallyCraft, craftName, alreadyDone + numToActuallyCraft, plan[craftable].toFixed(2))
+        craftLog.log("Crafting %i %s (%i/%f)", numToActuallyCraft, craftName, alreadyDone + numToActuallyCraft, plan[craftable].toFixed(2))
         executedPlan[craftable] = alreadyDone + numToActuallyCraft;
         game.workshop.craft(craftName, numToActuallyCraft)
         changeLeader(oldLeader);
@@ -1053,7 +1116,7 @@ function executeHunts() {
 //#region Incrementable Building
 
 function getToggleableBuildings(){
-    return gamePage.bld.buildingsData.filter(b => b.val > 0 && b.togglableOnOff);
+    return gamePage.bld.buildingsData.filter(function(b){return b.val > 0 && b.togglableOnOff; });
 }
 
 //TODO: Bleurgh Steamworks are hard :-(
@@ -1063,7 +1126,51 @@ function variableFromToggleableBuilding(bld){
         name: "ToggleBuilding|" + bldId,
     };
     bv[bldId] = 1;
+    var effects = bld.effectsCalculated || bld.effects;
+    if(bldId == "steamworks"){
+        bv.energy = -1 * effects.energyProduction * bld.val;
+
+        const magneto = game.bld.get("magneto");
+        const maxMagnetoBoost = magneto.val * magneto.effects.magnetoRatio;
+        const additionalBoostRatio = effects.magnetoBoostRatio * bld.val;
+        const additionalBoostRatioEffect = maxMagnetoBoost * effects.magnetoBoostRatio * bld.val;
+        bv.utility = additionalBoostRatioEffect * globalProductionUtility * 100;
+        buyableLog.log({
+            magnetos: magneto.val,
+            magnetoRatio: magneto.effects.magnetoRatio,
+            maxMagnetoBoost: maxMagnetoBoost,
+            magnetoBoostRatio: effects.magnetoBoostRatio,
+            numBlds: bld.val,
+            additionalBoostRatio: additionalBoostRatio,
+            additionalBoostRatioEffect: additionalBoostRatioEffect,
+            utility: bv.utility
+        });
+
+        var coalRes = game.resPool.get("coal");
+        var coalNoSteam = resoucePerTick(coalRes, 0);
+        var coalWithSteam = resoucePerTick(coalRes, 3, bld);
+        var coalPerTickDiff = coalNoSteam - coalWithSteam;
+        bv.coal = coalPerTickDiff * game.ticksPerSecond * planHorizonSeconds();
+
+        if(effects.manuscriptPerTickProd){
+            bv.manuscript = -1 * effects.manuscriptPerTickProd * game.ticksPerSecond * planHorizonSeconds() * bld.val;
+        }
+    }
     return bv;
+}
+
+function executeToggleBuildings(){
+    for(var bld of getToggleableBuildings()){
+        bldId = buttonId(bld)
+        const probOn = (plan["ToggleBuilding|" + bldId] || 0);
+        const wantedOn = Math.random() < probOn ? true : false;
+        const currentlyOn = bld.on == bld.val;
+        if(wantedOn != currentlyOn){
+            buyableLog.log("%s desiredOn %s currentlyOn %s", bldId, wantedOn, currentlyOn);
+            var btn = gamePage.bldTab.children.find(btn => buttonId(btn) == bldId);
+            btn.toggle.link.click();
+        }
+    }
 }
 
 function getIncrementableBuildings(){
@@ -1076,26 +1183,44 @@ function variableFromIncrementableBuilding(bld){
         name: "IncrementBuilding|" + bldId,
     };
     bv[bldId] = 1;
-    for(effect in bld.effectsCalculated){        
-        //console.log(effect)
-        if(! (effect.endsWith('PerTickAutoprod') || effect.endsWith('PerTickCon'))){
-            //console.log("Ignoring effect ", effect, "(not production related)");
+    var effects = bld.effectsCalculated || bld.effects;
+    for(effect in effects){        
+        buyableLog.log(effect)
+        if(effect == "energyProduction"){
+            bv.energy = -1 * effects[effect];
+            continue;
+        } else if (effect == "magnetoRatio") {
+            bv.utility = globalProductionUtility * 100 * effects[effect];
+        }
+        if(! (effect.endsWith('PerTickAutoprod') || effect.endsWith('PerTickCon') || effect.endsWith('PerTick') )){
+            buyableLog.log("Ignoring effect ", effect, "(not production related)");
             continue;
         }
-        if(bld.effectsCalculated[effect] == 0) {
-            //console.log("Ignoring effect ", effect, "(zero value)");
+        if(effects[effect] == 0) {
+            buyableLog.log("Ignoring effect ", effect, "(zero value)");
             continue;
         }
-        resName = effect.slice(0, effect.indexOf('PerTick'));        
+        resName = effect.slice(0, effect.indexOf('PerTick'));
         res = game.resPool.get(resName);
         //console.log(res)
         if(!res){
-            log.warn(bld, " is claiming to make a resource ", resName, " I can't find ", bld)
+            buyableLog.warn(bld, " is claiming to make a resource ", resName, " I can't find ", bld)
             continue;
         }
         resRate = resoucePerTick(res, 2, bld);
         bv[resName] = -resRate * game.ticksPerSecond * planHorizonSeconds();
     }
+
+    // Breweries should be off except during festivals.
+    if(bldId == "brewery"){
+        if(game.calendar.festivalDays > 0){
+            // Valueing happiness at ~0.2 per 10% currently.
+            bv.utility = 0.2 / 100;
+        } else {
+            bv.utility = -0.01;
+        }
+    }
+
     // TODO: Pollution
     return bv;
 }
@@ -1117,43 +1242,45 @@ function findHtmlCollection(collection, filterFn){
     return null;
 }
 
-function executeToggleBuildings(){
-    var blds = getIncrementableBuildings();
-    for(toggleableBld of blds) {
+function executeIncrementableBuilding(){
+    for(var toggleableBld of getIncrementableBuildings()) {       
+        buyableLog.log(toggleableBld);
         var desiredOn = plan["IncrementBuilding|" + toggleableBld.name] || 0;
-        bldBtn = gamePage.bldTab.children.find(btn => btn.opts.building == toggleableBld.name)
+        var bldBtn = gamePage.bldTab.children.find(btn => btn.opts.building == toggleableBld.name)
         var currentlyOn = bldBtn.model.on;
-        prob = desiredOn - Math.floor(desiredOn)
+        var prob = desiredOn - Math.floor(desiredOn)
         if(Math.random() < prob)
             desiredOn = Math.ceil(desiredOn)
         else 
             desiredOn = Math.floor(desiredOn)
-        if(currentlyOn == desiredOn)
-            return;
+        buyableLog.log("%s desired on %i", toggleableBld.name, desiredOn);
+        if(currentlyOn == desiredOn){
+            buyableLog.log("%s currently on %i matches desired on %i", toggleableBld.name, currentlyOn, desiredOn);
+            continue;
+        }
 
         var onLinksDiv = findHtmlCollection(bldBtn.buttonContent.children, c => c.tagName == "DIV" && findHtmlCollection(c.children, anc => anc.tagName == "A" && anc.title == "+") != null)
         var offLinksDiv = findHtmlCollection(bldBtn.buttonContent.children, c => c.tagName == "DIV" && findHtmlCollection(c.children, anc => anc.tagName == "A" && anc.title == "-") != null)
         var onMultiDiv = findHtmlCollection(onLinksDiv.children, c => c.tagName == "DIV" && c.className == "linkContent")
         var offMultiDiv = findHtmlCollection(offLinksDiv.children, c => c.tagName == "DIV" && c.className == "linkContent")
         if(desiredOn == bldBtn.model.metadata.val){
-            console.log("Firing up all ", toggleableBld.name)
+            buyableLog.log("Firing up all ", toggleableBld.name)
             var onAllLink = findHtmlCollection(onMultiDiv.children, l => l.tagName == "A" && l.title == "+all")
             onAllLink.click();
             continue;
         }
         if(desiredOn == 0) {
-            console.log("Power down all ", toggleableBld.name)
+            buyableLog.log("Power down all ", toggleableBld.name)
             var offAllLink = findHtmlCollection(offMultiDiv.children, l => l.tagName == "A" && l.title == "-all")
             offAllLink.click();
             continue;
         }
-        console.log("Moderating number of ", toggleableBld.name, " to ", desiredOn, " from ", currentlyOn)
+        buyableLog.log("Moderating number of ", toggleableBld.name, " to ", desiredOn, " from ", currentlyOn)
+        var changeAmount = Math.abs(currentlyOn - desiredOn);
         if(currentlyOn > desiredOn){
-            changeAmount = currentlyOn - desiredOn;
             singleLink = findHtmlCollection(offLinksDiv.children, l => l.tagName == "A")
             twentyFiveLink = findHtmlCollection(offMultiDiv.children, l => l.tagName == "A" && l.title == "-25")
         } else {
-            changeAmount = desiredOn - currentlyOn; 
             singleLink = findHtmlCollection(onLinksDiv.children, l => l.tagName == "A")
             twentyFiveLink = findHtmlCollection(onMultiDiv.children, l => l.tagName == "A" && l.title == "+25")
         }
@@ -1176,6 +1303,11 @@ function executeToggleBuildings(){
 function resoucePerTick(res, mode = 0, modeVariable = null) {
     //console.log("resoucePerTick(%s, %i, %s)", res.name, mode, buttonId(modeVariable))
     var productionStack = game.getResourcePerTickStack(res.name, false, game.calendar.season);
+    if(mode == 3 && res.name == "coal"){
+        if(productionStack.find(s => s.name == "Steamworks") == null){
+            productionStack.splice(8, 0, {name: "Steamworks", type: "ratio", value: modeVariable.effects.coalRatioGlobal});
+        }
+    }
     return evaluateProductionStack(productionStack, res, mode, modeVariable)
 }
 
@@ -1189,6 +1321,7 @@ mode:
 function evaluateProductionStack(stack, resource, mode, modeVariable){
     var prod = 0.0;
     var lastMod = null;
+    var effects = modeVariable ? modeVariable.effectsCalculated || modeVariable.effects : null;
     //console.log(stack)
     for(var resourceModifier of stack){
         //console.debug(prod, resourceModifier)
@@ -1206,29 +1339,36 @@ function evaluateProductionStack(stack, resource, mode, modeVariable){
             }
         }
         else if (resourceModifier.name == 'Conversion Production' && lastMod == null){
-            if(mode == 2)
-                prod += (modeVariable.effectsCalculated[resource.name + "PerTickAutoprod"] || 0);
-            else {            
+            if(mode == 2) {
+                prod += (effects[resource.name + "PerTickAutoprod"] || 0);
+            } else {            
                 continue;
             }
         }
-        // else if (resourceModifier.name == 'Conversion Production' && lastMod != null){
-        //     if(mode == 3)
-        //         prod += (modeVariable.effects[resource.name + "PerTickProd"] || 0) * steamBld.val;
-        //     else {            
-        //         continue;
-        //     }
-        // }
-        else if (resourceModifier.name == 'Conversion Consumption'){
-            if(mode == 2)
-                prod += (modeVariable.effectsCalculated[resource.name + "PerTickCon"] || 0);
+        else if(resourceModifier.name == "Without Improvement" && lastMod == null){
+            if(mode == 2){
+                prod += (effects[resource.name + "PerTick"] || 0)
+            } else {
+                continue;
+            }
         }
-        // else if (resourceModifier.name == 'Steamworks'){
-        //     //console.log("Steamworks!?")
-        //     if(mode == 3){
-        //         prod *= 1 + (modeVariable.effects["coalRatioGlobal"] || 0)
-        //     }
-        // }
+        else if (resourceModifier.name == 'Conversion Production' && lastMod != null){
+            if(mode == 3) {
+                prod += (effects[resource.name + "PerTickProd"] || 0) * modeVariable.val;
+            } else {
+                continue;
+            }
+        }
+        else if (resourceModifier.name == 'Conversion Consumption'){
+            if(mode == 2){
+                prod += (effects[resource.name + "PerTickCon"] || 0);
+            } else {
+                continue;
+            }
+        }
+         else if (resourceModifier.name == 'Steamworks' && mode != 3){
+            continue;
+        }
         // else if (resourceModifier.name == 'Magnetos'){
         //     var magRatio = 1 + game.getEffect("magnetoRatio");
         //     if(mode == 3){
@@ -1281,12 +1421,13 @@ function projectResourceAmount(res) {
         return projected;
 }
 
-// Reserve one season of nip
+// Reserve half a season season of nip
+// TODO: Is the below TODO still true?
 // TODO: reservedNipAmount is way too conservative. In spring we can reserve far far less for example.
 function reservedNipAmount(){
     var nipDemandRatio = 1 + gamePage.globalEffectsCached.catnipDemandRatio;
     var ktns = gamePage.resPool.resourceMap["kittens"].value ;
-    return ktns * nipDemandRatio * gamePage.village.happiness * 4 * 200 
+    return ktns * nipDemandRatio * gamePage.village.happiness * 4 * 100 
 }
 
 //#endregion
@@ -1328,6 +1469,11 @@ function includeLoglevel() {
            window.buyableLog = woodman.getLogger("main.buyable");
            window.jobLog = woodman.getLogger("main.Jobs");
            window.craftLog = woodman.getLogger("main.Craft");
+
+           buyableLog.level = "info";
+           jobLog.level = "info";
+           craftLog.level = "info";
+
            logger.log("woodman downloaded and executed");
         }
     };
@@ -1507,7 +1653,7 @@ function variableForPromoteLeader(){
     if(civilServiceNotResearched())
         return null;
     var highRank = kittenForPromotion();
-    var expToPromote = game.village.sim.expToPromote(highRank.rank, highRank.rank + 1, game.village.leader.exp)
+    var expToPromote = game.village.sim.expToPromote(highRank.rank, highRank.rank + 1, highRank.exp)
     // Not much we can do about a lack of experience.
     if(!expToPromote[0])
         return null;
@@ -1527,14 +1673,17 @@ function promoteUnderPlan(){
         return;
     if(civilServiceNotResearched())
         return null;
+    const timeEnter = performance.now();
     var highRank = kittenForPromotion();
-    var expToPromote = game.village.sim.expToPromote(highRank.rank, highRank.rank + 1, game.village.leader.exp);
+    var expToPromote = game.village.sim.expToPromote(highRank.rank, highRank.rank + 1, highRank.exp);
     var goldToPromote = game.village.sim.goldToPromote(highRank.rank, highRank.rank + 1, game.resPool.get("gold").value);
     if (expToPromote[0] && goldToPromote[0]) {
-        logger.log("Congrats to %s %s who was promoted from rank %i to %i", highRank.name, highRank.surname, highRank.rank, highRank.rank + 1)
+        execLog.info("Congrats to %s %s who was promoted from rank %i to %i", highRank.name, highRank.surname, highRank.rank, highRank.rank + 1)
         game.village.sim.promote(highRank);
         executedPlan.PromoteLeader = 1;
     }
+    const timeExit = performance.now();
+    execLog.log("%s took %ims", "promoteUnderPlan", timeExit - timeEnter);
 }
 
 function switchLeaderToBuy(btn){
@@ -1668,7 +1817,7 @@ function variableForPraiseSun(){
         var predictedSolRevBonus = calculateSolarRevolutionRatio(worship + additionalWorship);
         var extraSolRevBonusPP = predictedSolRevBonus - currentSolRevBonus;
         // How much is another 1% production worth? Quite a damn lot!
-        var utilityForSolRev = extraSolRevBonusPP * 100 * 5;
+        var utilityForSolRev = extraSolRevBonusPP * 100 * globalProductionUtility;
         //faithLog.info("Utility for solar revolution bonus: %f (currentSolRevBonus: %f, predictedSolRevBonus: %f)", utilityForSolRev, currentSolRevBonus, predictedSolRevBonus);
         utility += utilityForSolRev;
     }
@@ -1758,20 +1907,27 @@ function buttonId(btn){
     return btn.opts.name;
 }
 
-function plannedUtilities(){
+function plannedUtilities(onlyBuildables = true, topN = 5, orderBy = "quantityChange"){
     var pu = [];
+    var lastPlan = historicPlans.get(1);
     for(var planItem in plan){
         //logger.log(planItem)
         if(model.variables[planItem] && model.variables[planItem].utility){
+            if(onlyBuildables && !(planItem.startsWith("Build|")))
+                continue;
             //logger.log(plan[planItem])
             pu.push({
                 name: planItem, 
                 utilityPerItem: model.variables[planItem].utility.toFixed(2), 
                 quantity: plan[planItem].toFixed(2), 
+                previousQuantity: (lastPlan ? (lastPlan[planItem] || 0) : 0).toFixed(2),
+                quantityChange: (plan[planItem] - (lastPlan ? (lastPlan[planItem] || 0) : 0)).toFixed(2),
                 totalUtility: (model.variables[planItem].utility * plan[planItem]).toFixed(2)});
         }
     }
-    pu.sort(function(a, b){return b.quantity-a.quantity});
+    pu.sort(function(a, b){return b[orderBy]-a[orderBy]});
+    if(topN > 0)
+        pu.length = topN;
     return pu;
 }
 
@@ -1824,3 +1980,31 @@ function clone(obj){
 
 //#endregion Utilities
 
+//#region Reset
+
+var planningForResetSince = null;
+function shouldStartResetCountdown(){
+    if(planningForResetSince){
+        return true;
+    }
+    var paragon = game.resPool.get("paragon").value;
+    var totalParagon = paragon + game.resPool.get("burnedParagon").value;
+    if(totalParagon == 0){
+        // First reset after Concrete Huts is a typical kind of time.
+        if(game.workshop.get("concreteHuts").researched){
+            planningForResetSince = new Date();
+            return true;
+        }
+    } else {
+        // Lets try to double paragon.
+        var resetParagon = game.getResetPrestige().paragonPoints;
+        if(resetParagon * 2 >= totalParagon){
+            planningForResetSince = new Date();
+            return true;
+        }
+    }
+    return false;
+}
+
+
+//#endregion

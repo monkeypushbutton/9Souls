@@ -1,22 +1,19 @@
 // TODO: Kittens massacre in year 1 due to building too many huts. Sad but not a deal breaker.
 // TODO: UI often doesn't refresh after script takes an action. Smelters going on and off are a case in point.
 // TODO: LP Still wants to assign kittens to e.g. scientist when resource is at max at certain points. I'm manually correcting for it right now, which sucks.
-// TODO: Add variable and implementation for steamworks on vs off. I have a hunch that off with be the right choice 95% of time at least until magnetos.
-// TODO: Festivals
+// TODO: Space
 
 // NB: Season is ~ 200 seconds long. 
 var executeIntervalSeconds = 20;
+
+// How much history should we keep?
 var planHistory = 5;
 var purchaseHistory = 50;
-var plannedSeason = -1;
-var reservedFarmers = 0;
-var plannedKittens = 0;
-// How much utility is 1% of happiness worth?
+
+// How much utility is 10% of happiness worth?
 var happinessUtility = 0.05;
 // How much utility is 1% production bonus worth (magneto, solarRevolution, steamworks)
 var globalProductionUtility = 3;
-var plannedButtons = [];
-
 // Give buildings diminishing returns for building more of them.
 var diminishingReturns = false;
 
@@ -88,6 +85,7 @@ function ensureTabsRendered(){
 function executePlanNow(timesBought = 0){
     execLog.log("Executing");
     praiseUnderPlan();
+    executeResetLogic();
     if(gamePage.calendar.season != plannedSeason){
         execLog.log("Replanning (season)");
         planNow();
@@ -103,6 +101,7 @@ function executePlanNow(timesBought = 0){
         planNow();
     }
     //console.time("executePlan");
+    executeFestival();
     promoteUnderPlan();
     observeTheSky();
     controlGatherLoop();
@@ -128,7 +127,7 @@ function executePlanNow(timesBought = 0){
 
 function observeTheSky(){    
     if(gamePage.calendar.observeBtn){
-        execLog.info("Observing...")
+        execLog.log("Observing...")
         gamePage.calendar.observeBtn.click();
     }
 }
@@ -142,6 +141,13 @@ var executedPlan;
 var historicPlans = new CircularBuffer(planHistory);
 var historicModels = new CircularBuffer(planHistory);
 var historicExecution = new CircularBuffer(purchaseHistory);
+
+// We use these variables to track if we need to replan. Do not change.
+var plannedSeason = -1;
+var plannedKittens = 0;
+var plannedButtons = [];
+var reservedFarmers = 0;
+
 function planNow(){
     plannedSeason = gamePage.calendar.season;
     plannedButtons = getBuyables();
@@ -292,6 +298,10 @@ function buildModel() {
     if(sacVariable){
         model.variables[sacVariable.name] = sacVariable;
     }
+    var festVariable = variableForFestival();
+    if(festVariable){
+        model.variables[festVariable.name] = festVariable;
+    }
     reservedFarmers = reserveFarmers();
     model.constraints.kittens.max -= reservedFarmers;
     const timeExit = performance.now();
@@ -306,20 +316,29 @@ function getBuyables(feasible = true) {
     // console.time("bldTab.render");
     // gamePage.bldTab.render();    
     // console.timeEnd("bldTab.render");
-    buyable = gamePage.bldTab.children.slice(2).filter(b => isFeasible(b) == feasible);
-    
+    buyable = gamePage.bldTab.children.slice(2).filter(b => 
+        isFeasible(b) == feasible && (
+            !planningForResetSince || 
+            b.model.metadata.effects.maxKittens || 
+            game.bldTab.bldGroups.find(bg => bg.group.name == "storage").group.buildings.find(build => build == buttonId(b))
+        )
+    );
+
+    if(planningForResetSince)
+        return buyable;
+
+    if(gamePage.workshopTab.visible){
+        // gamePage.workshopTab.render();
+        buyable = buyable.concat(gamePage.workshopTab.buttons.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched));
+    }
     if(gamePage.libraryTab.visible){
         // console.time("libraryTab.render");
         // gamePage.libraryTab.render();
         // console.timeEnd("libraryTab.render");
         buyable = buyable.concat(gamePage.libraryTab.buttons.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched));
         if(gamePage.libraryTab.policyPanel.visible){
-            buyable = buyable.concat(gamePage.libraryTab.policyPanel.children.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched))
+            buyable = buyable.concat(gamePage.libraryTab.policyPanel.children.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched && !b.model.metadata.blocked))
         }
-    }
-    if(gamePage.workshopTab.visible){
-        // gamePage.workshopTab.render();
-        buyable = buyable.concat(gamePage.workshopTab.buttons.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched));
     }
     if(gamePage.diplomacyTab.visible){
         // gamePage.diplomacyTab.render();
@@ -356,11 +375,18 @@ function variableFromButton(btn, outOfReach){
 var baseUtilityMap = {
     // Workshop
     factoryAutomation: 0.1,
+    advancedAutomation: 0.1,
+    barges: 0.2,
+
     // Science
     // In game description is accurate.
     socialism: 0.0001,
+    // Script spends a lot of time with capped buildings, republic is *probably* better.
+    // authocracy: 0.9,
+
     // Faith
     templars: 1,
+    apocripha: 12,
     ivoryTower: 6,
     // Bonfire
     workshop: 3,
@@ -375,7 +401,7 @@ var baseUtilityMap = {
     // Hunting is just more a straight up more efficient use of manpower.
     mint: 0.2,
         // Production
-    magneto: 2,
+    magneto: 1.5,
     smelter: 1.5,
     unicornPasture: 0.5
 };
@@ -383,10 +409,10 @@ var baseUtilityMap = {
 function buttonUtility(btn, outOfReach = null){
     const timeEnter = performance.now();
     var id = buttonId(btn)
-    var utility = 1;
     // Faith upgrades are pretty important, as are science and workshop.
     // Incentivise them as they tend to look expensive to the optimiser.
     var mappedUtility = baseUtilityMap[id];
+    var utility = mappedUtility || 1;
     if(btn.model.prices.find(p => p.name == "faith"))
         utility = mappedUtility || 5;
     else if(btn.tab && btn.tab.tabId == "Science")
@@ -433,13 +459,14 @@ function buttonUtility(btn, outOfReach = null){
         }
         //logger.log(id, utility);
     }
+
     // Jittery
     utility = utility * (1 + Math.random() / 10);
     //buyableLog.log("%s: Final utility including jitter %s", id, utility.toFixed(4))
     //if(outOfReach)
         // console.timeEnd("buttonUtility")
     const timeExit = performance.now();
-    //buyableLog.log("buttonUtility took %i ms", timeExit - timeEnter);
+    buyableLog.log("buttonUtility took %i ms", timeExit - timeEnter);
     return utility;
 }
 
@@ -559,11 +586,11 @@ function getJobAssignments() {
 }
 
 function variableFromJobAssignment(j) {
-    jv = {
+    var jv = {
         name: "Job|" + buttonId(j),
         kittens: 1
     };
-    for(mod in j.modifiers){        
+    for(var mod in j.modifiers){        
         var jobProduction = resoucePerTick(gamePage.resPool.resourceMap[mod], 1, j);
         jv[mod] = -1 * jobProduction * planHorizonSeconds() * game.ticksPerSecond
     }
@@ -578,6 +605,36 @@ function variableFromJobAssignment(j) {
         }
     }
     return jv;
+}
+
+function variableForFestival(){
+    if(!game.science.get("drama").researched)
+        return null;
+    if(game.calendar.festivalDays > (100 - gamePage.calendar.day))
+        return null;
+    var doFest = game.villageTab.festivalBtn;
+    return {
+        name: "Festival",
+        manpower: 1500,
+        culture: 5000,
+        parchment: 2500,
+        utility: happinessUtility * 3
+    };
+}
+
+function executeFestival(){
+    var numPlanned = Math.floor(plan.Festival || 0);
+    if(!numPlanned)
+        return;
+    var numPerformed = (executedPlan.Festival || 0);
+    if(numPerformed > 0)
+        return;
+    var doFest = game.villageTab.festivalBtn;
+    if(canAffordNow(doFest)){
+        execLog.log("P A R T Y Wooop Woop!");
+        doFest.click();
+        executedPlan.Festival = 1;
+    }
 }
 
 function jobResourcesMaxed(job){
@@ -792,7 +849,7 @@ function variableFromTrade(tradeRace, outOfReach) {
     var spiceRes = game.resPool.get("spice");
     var spiceCons = resoucePerTick(spiceRes);
     if(projectResourceAmount(spiceRes) < -1 * spiceCons * game.ticksPerSecond * planHorizonSeconds()){
-        tradeUtility += 0.05;
+        tradeUtility += happinessUtility;
     }
     if(tradeUtility)
         tv.utility = tradeUtility;
@@ -865,11 +922,14 @@ function variableFromCraft(c, outOfReach){
     }
     // Ships are good, up to a point ;-)
     else if(craft == "ship"){
-        var builtAlready = game.resPool.get("ship").value;
-        var baseutility = builtAlready < 200 ? 2 : 0;
-        // 100 trade ships = spiders.
-        var utilityDivider = builtAlready > 125 ? (builtAlready - 125) : 1;
-        cv.utility = baseutility / utilityDivider;
+        const maxShips = 5000;
+        const fractionofShipsPerUtility = 0.15;
+        const builtAlready = game.resPool.get("ship").value;
+        if(builtAlready < maxShips){
+            const shipsPerUtility = builtAlready * fractionofShipsPerUtility;
+            const utilityPerCraft = craftAmt / shipsPerUtility;
+            cv.utility = utilityPerCraft;
+        }
     } 
     // Manuscript max culture bonus (and may incentivize early temple)
     else if (craft == "manuscript") {
@@ -1042,12 +1102,12 @@ function variableFromHunt(){
     var furDesiredToBuffer = -1 * furCons * game.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(furRes);
     var huntsToFillFurBuffer = furDesiredToBuffer / averageFurs; 
     if(furDesiredToBuffer > 0){
-        utilityForLux += 0.05;
+        utilityForLux += happinessUtility;
     }
     var ivoryDesiredToBuffer = -1 * ivoryCons * game.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(ivoryRes);
     var huntsToFillIvoryBuffer = ivoryDesiredToBuffer / averageIvory;
     if(ivoryDesiredToBuffer > 0){
-        utilityForLux += 0.05;
+        utilityForLux += happinessUtility;
     }
     // Sooo sparkly.
     unicornResource = game.resPool.get('unicorns');
@@ -1119,7 +1179,7 @@ function getToggleableBuildings(){
     return gamePage.bld.buildingsData.filter(function(b){return b.val > 0 && b.togglableOnOff; });
 }
 
-//TODO: Bleurgh Steamworks are hard :-(
+// Bleurgh Steamworks are hard :-(
 function variableFromToggleableBuilding(bld){
     bldId = buttonId(bld)
     bv = {
@@ -1184,15 +1244,27 @@ function variableFromIncrementableBuilding(bld){
     };
     bv[bldId] = 1;
     var effects = bld.effectsCalculated || bld.effects;
+
+    // Smelter doesn't have correct values in effects, only effectsCalculated
+    // Calciner doesn't have energyConsumption in effectsCalculated, only effects
+    // Magneto doesn't have effectsCalculated at all. It's all a bit yikes.
+    if(bld.effects && bld.effects.energyConsumption)
+        bv.energy = bld.effects.energyConsumption;
+
     for(effect in effects){        
         buyableLog.log(effect)
         if(effect == "energyProduction"){
             bv.energy = -1 * effects[effect];
             continue;
-        } else if (effect == "magnetoRatio") {
+        } 
+        else if(effect == "energyConsumption"){
+            bv.energy = effects[effect];
+            continue;
+        } 
+        else if (effect == "magnetoRatio") {
             bv.utility = globalProductionUtility * 100 * effects[effect];
         }
-        if(! (effect.endsWith('PerTickAutoprod') || effect.endsWith('PerTickCon') || effect.endsWith('PerTick') )){
+        if(! (effect.endsWith('PerTickAutoprod') || effect.endsWith('PerTickCon') || effect.endsWith('PerTick') || effect.endsWith('PerTickBase') )){
             buyableLog.log("Ignoring effect ", effect, "(not production related)");
             continue;
         }
@@ -1200,8 +1272,8 @@ function variableFromIncrementableBuilding(bld){
             buyableLog.log("Ignoring effect ", effect, "(zero value)");
             continue;
         }
-        resName = effect.slice(0, effect.indexOf('PerTick'));
-        res = game.resPool.get(resName);
+        var resName = effect.slice(0, effect.indexOf('PerTick'));
+        var res = game.resPool.get(resName);
         //console.log(res)
         if(!res){
             buyableLog.warn(bld, " is claiming to make a resource ", resName, " I can't find ", bld)
@@ -1336,6 +1408,16 @@ function evaluateProductionStack(stack, resource, mode, modeVariable){
             } else {
                 //console.log("ignoring village production")
                 continue;
+            }
+        }
+        else if (resourceModifier.name == "Production" && lastMod == null) {
+            switch(mode){
+                case 1:
+                case 3:
+                    prod += resourceModifier.value;
+                    break;
+                case 2:
+                    prod += effects[resource.name + "PerTickBase"] || 0;
             }
         }
         else if (resourceModifier.name == 'Conversion Production' && lastMod == null){
@@ -1796,29 +1878,32 @@ function leaderDiscountRatio(btn, resName){
 
 //#region Faith
 
+// TODO: Adore
+// TODO: Transcend
+
 function variableForPraiseSun(){
     if(!gamePage.religionTab.visible)
         return null;
     gamePage.religionTab.render();
-    var halfFaith = game.resPool.get("faith").maxValue / 2;
-    var additionalWorship = halfFaith * (1 + game.religion.getApocryphaBonus());
+    const halfFaith = game.resPool.get("faith").maxValue / 2;
+    const additionalWorship = halfFaith * (1 + game.religion.getApocryphaBonus());
     // TODO: Faith is not 1-1 with worship after apocrypha / transcend etc.
     // What a crumbily named variable :-(. Hysterical raisins I suppose.
-    var worship = game.religion.faith;
-    var nextUnlockBtn = gamePage.religionTab.rUpgradeButtons.find(ru => !ru.model.visible);
-    var revolutionBtn = gamePage.religionTab.rUpgradeButtons.find(ru => ru.id == "solarRevolution");
+    const worship = game.religion.faith;
+    const nextUnlockBtn = gamePage.religionTab.rUpgradeButtons.find(ru => !ru.model.visible);
+    const revolutionBtn = gamePage.religionTab.rUpgradeButtons.find(ru => ru.id == "solarRevolution");
     // Utility for unlocking another option to work towards.
-    var worshipToUnlockNextOption = nextUnlockBtn ? nextUnlockBtn.model.metadata.faith - worship: -1;
-    var howFarDoesPraiseGetUs = Math.min(1, additionalWorship / worshipToUnlockNextOption);
+    const worshipToUnlockNextOption = nextUnlockBtn ? nextUnlockBtn.model.metadata.faith - worship: -1;
+    const howFarDoesPraiseGetUs = Math.min(1, additionalWorship / worshipToUnlockNextOption);
     var utility = nextUnlockBtn ? howFarDoesPraiseGetUs : 0;
-    //faithLog.info("Utility for unlocks: %f (additionalWorship: %f, worshipToUnlockNextOption: %f, howFarDoesPraiseGetUs: %f)", utility, additionalWorship, worshipToUnlockNextOption, howFarDoesPraiseGetUs);
+    faithLog.log("Utility for unlocks: %f (additionalWorship: %f, worshipToUnlockNextOption: %f, howFarDoesPraiseGetUs: %f)", utility, additionalWorship, worshipToUnlockNextOption, howFarDoesPraiseGetUs);
     if(revolutionBtn.model.metadata.val > 0){
-        var currentSolRevBonus = calculateSolarRevolutionRatio(worship);
-        var predictedSolRevBonus = calculateSolarRevolutionRatio(worship + additionalWorship);
-        var extraSolRevBonusPP = predictedSolRevBonus - currentSolRevBonus;
+        const currentSolRevBonus = calculateSolarRevolutionRatio(worship);
+        const predictedSolRevBonus = calculateSolarRevolutionRatio(worship + additionalWorship);
+        const extraSolRevBonusPP = predictedSolRevBonus - currentSolRevBonus;
         // How much is another 1% production worth? Quite a damn lot!
-        var utilityForSolRev = extraSolRevBonusPP * 100 * globalProductionUtility;
-        //faithLog.info("Utility for solar revolution bonus: %f (currentSolRevBonus: %f, predictedSolRevBonus: %f)", utilityForSolRev, currentSolRevBonus, predictedSolRevBonus);
+        const utilityForSolRev = extraSolRevBonusPP * 100 * globalProductionUtility;
+        faithLog.log("Utility for solar revolution bonus: %f (currentSolRevBonus: %f, predictedSolRevBonus: %f)", utilityForSolRev, currentSolRevBonus, predictedSolRevBonus);
         utility += utilityForSolRev;
     }
     return {
@@ -1865,7 +1950,7 @@ function variableForSacrifice(){
     }
     // Tears are a luxury.
     if(game.resPool.get("tears").value == 0)
-        su.utility = 0.5;
+        su.utility = 0.1;
     return su;
 }
 
@@ -1985,26 +2070,40 @@ function clone(obj){
 var planningForResetSince = null;
 function shouldStartResetCountdown(){
     if(planningForResetSince){
-        return true;
+        return planningForResetSince;
     }
     var paragon = game.resPool.get("paragon").value;
     var totalParagon = paragon + game.resPool.get("burnedParagon").value;
     if(totalParagon == 0){
         // First reset after Concrete Huts is a typical kind of time.
-        if(game.workshop.get("concreteHuts").researched){
+        // Researching apocripha should also be a priority as epiphany carries over.
+        if(game.workshop.get("concreteHuts").researched && game.religion.getRU("apocripha").on){
             planningForResetSince = new Date();
-            return true;
         }
     } else {
         // Lets try to double paragon.
         var resetParagon = game.getResetPrestige().paragonPoints;
-        if(resetParagon * 2 >= totalParagon){
+        if(resetParagon * 2 >= totalParagon && game.religion.getRU("apocripha").on){
             planningForResetSince = new Date();
-            return true;
         }
     }
-    return false;
+    return planningForResetSince;
 }
 
+function executeResetLogic(){
+    var planningSince = shouldStartResetCountdown();
+    if(!planningSince)
+        return;
+    var diffMins = (new Date() - planningSince) / (1000 * 60) ;
+    execLog.warn("Planning for reset for last %f mins", diffMins.toFixed(2));
+    if(diffMs > 10)
+    {
+        execLog.warn("Goodbye cruel world!");
+        // Should always be true I think, but who knows - this code is hard to test ;-)
+        if(game.religionTab.adoreBtn.model.visible)
+            game.religionTab.adoreBtn.click();
+        game.reset();
+    }
+}
 
 //#endregion

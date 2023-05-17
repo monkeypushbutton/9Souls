@@ -1,7 +1,11 @@
 // TODO: Kittens massacre in year 1 due to building too many huts. Sad but not a deal breaker.
 // TODO: UI often doesn't refresh after script takes an action. Smelters going on and off are a case in point.
-// TODO: LP Still wants to assign kittens to e.g. scientist when resource is at max at certain points. I'm manually correcting for it right now, which sucks.
+// TODO: Pollution
 // TODO: Space
+// TODO: Upgrade
+
+// TODO: Check if below TODO is still valid after resCap constraints?
+// TODO: LP Still wants to assign kittens to e.g. scientist when resource is at max at certain points. I'm manually correcting for it right now, which sucks.
 
 // NB: Season is ~ 200 seconds long. 
 var executeIntervalSeconds = 20;
@@ -9,13 +13,20 @@ var executeIntervalSeconds = 20;
 // How much history should we keep?
 var planHistory = 5;
 var purchaseHistory = 50;
+var tradeHistory = 50;
 
 // How much utility is 10% of happiness worth?
+// Setting this too high will end up in a loop of hunting / festival as soon as unlocked.
 var happinessUtility = 0.05;
 // How much utility is 1% production bonus worth (magneto, solarRevolution, steamworks)
-var globalProductionUtility = 3;
+var globalProductionUtility = 1;
 // Give buildings diminishing returns for building more of them.
 var diminishingReturns = false;
+// Randomly perturb utility values. I don't know why I added this.
+var jiggleUtility = false;
+// Once we switch job assignments this many times (as a percentage of total kittens), 
+// optimise job assignments using "Manage Jobs" button
+var reassignmentsBeforeOptimise = 0.2;
 
 var eventLoops = {
     execHandle: undefined,
@@ -275,6 +286,11 @@ function buildModel() {
                 max: projectResourceAmount(res)
             }
         }
+        if(res.maxValue){
+            model.constraints[res.name + "Cap"] = {
+                max: res.maxValue
+            }
+        }
     }
     var promoteVariable = variableForPromoteLeader();
     if(promoteVariable)
@@ -366,7 +382,9 @@ function variableFromButton(btn, outOfReach){
         utility: buttonUtility(btn, outOfReach)
     }
     for(pe of btn.model.prices){
-        variable[pe.name] = pe.val * leaderDiscountRatio(btn, pe.name);
+        const price = pe.val * leaderDiscountRatio(btn, pe.name);
+        variable[pe.name] = price;
+        variable[pe.name + "Cap"] = price;
     }
     return variable;
 }
@@ -378,6 +396,15 @@ var baseUtilityMap = {
     advancedAutomation: 0.1,
     barges: 0.2,
 
+    // Resources
+    oxidation: 15,
+
+    // Making more huts is v.g.
+    ironwood: 20,
+    concreteHuts: 20,
+    unobtainiumHuts: 20,
+    eludiumHuts: 20,
+
     // Science
     // In game description is accurate.
     socialism: 0.0001,
@@ -387,20 +414,23 @@ var baseUtilityMap = {
     // Faith
     templars: 1,
     apocripha: 12,
+    solarRevolution: 12,
     ivoryTower: 6,
+
     // Bonfire
     workshop: 3,
-        // Pop
+    // Pop
     hut: 5,
     logHouse: 2.5,
     mansion: 2.5,
-        // Storage
-        // Additional storage not that useful. We hopefuly aren't going to hover max resources with this script.
+    // Storage
+    // Additional storage not that useful. We hopefuly aren't going to hover max resources with this script.
     barn: 0.5,
     warehouse: 0.5,
+    harbor: 0.5,
     // Hunting is just more a straight up more efficient use of manpower.
-    mint: 0.2,
-        // Production
+    mint: 0.3,
+    // Production
     magneto: 1.5,
     smelter: 1.5,
     unicornPasture: 0.5
@@ -423,45 +453,50 @@ function buttonUtility(btn, outOfReach = null){
     else if(btn.race){
         // TODO: Should Embassy returns be based somewhat on unlocks?
         var baseutility = mappedUtility || 0.75;
-        var builtAlready = btn.model.metadata.val;        
+        const builtAlready = btn.model.metadata.val;        
         utility = baseutility - (diminishingReturns ? game.getLimitedDR(builtAlready, baseutility) : 0);
     }
     else if(gamePage.bld.buildingsData.find(bd => bd.name == id)) {
         var baseutility = mappedUtility || 1;
-        if(id == "steamworks"){
-            // Steamworks are pretty bad before megneto (I think)
-            var magnetos = gamePage.bld.get("magneto").val
-            baseutility = magnetos == 0 ? 0.2 : 1;
+        if(id == "steamworks" && !gamePage.bld.get("magneto").val){
+            baseutility = 0.2;
         }
-        else if (id == "oilWell") {
+        buyableLog.log("%s: Base utility: %f", id, baseutility.toFixed(2));
+        if (id == "oilWell") {
             //logger.log(id);
             var oil = game.resPool.get("oil");
             if(oil.value == oil.maxValue){
-                baseutility = 0.5;
-                //logger.log("Penalty for produced resource maxxed.", id, baseutility);
+                baseutility = baseutility / 2;
+                buyableLog.log("%s: Penalty applied for produced resource maxxed %f", id, baseutility.toFixed(2));
             }
         }
         // already not using all of building x, disincentivise
         if(btn.model.metadata.val > btn.model.metadata.on){
             baseutility = baseutility / 2;
-            //logger.log("Penalty for not all in use.", id, baseutility);
+            buyableLog.log("%s: Penalty applied for not all in use %f", id, baseutility.toFixed(2));
         }
             
-        //buyableLog.log("%s: Base utility: %f", id, baseutility.toFixed(4));
         // Give them diminishing returns to incentivise climbing the tech tree faster.
-        var builtAlready = btn.model.metadata.val
-        utility = baseutility - (diminishingReturns ? game.getLimitedDR(builtAlready, baseutility) : 0);
-        //buyableLog.log("%s: Have %i Discounted utility: %f", id, builtAlready, utility.toFixed(4));
+        if(diminishingReturns){
+            const builtAlready = btn.model.metadata.val
+            utility = baseutility - game.getLimitedDR(builtAlready, baseutility);
+            buyableLog.log("%s: %i Discounted utility: %f", id, builtAlready, utility.toFixed(2));
+        } else {
+            utility = baseutility;
+        }
         // Storage buildings are more useful than they appear naively, beacause we want to push up the tech tree for example.
-        if(outOfReach && Object.keys(btn.model.metadata.effects).find(e => e.endsWith("Max")) ){
-            utility += utilityForSorageCap(outOfReach, btn.model.metadata.effects);
+        if(outOfReach && Object.keys(btn.model.metadata.effects).find(e => e.endsWith("Max") || e.endsWith("MaxRatio")) ){            
+            const additionalUtility = utilityForSorageCap(id , outOfReach, btn.model.metadata.effects);
+            buyableLog.log("%s: %f additional utility for storage cap: %f", id, additionalUtility.toFixed(2), utility.toFixed(2));
+            utility += additionalUtility
             //logger.log(id, utility);
         }
         //logger.log(id, utility);
     }
 
     // Jittery
-    utility = utility * (1 + Math.random() / 10);
+    if(jiggleUtility)
+        utility = utility * (1 + Math.random() / 10);
     //buyableLog.log("%s: Final utility including jitter %s", id, utility.toFixed(4))
     //if(outOfReach)
         // console.timeEnd("buttonUtility")
@@ -492,20 +527,39 @@ function allProductionMaxxed(model){
     return true;    
 }
 
-function utilityForSorageCap(outOfReach, effects){
+function utilityForSorageCap(id, outOfReach, effects){
     var utility = 0;
     for(var infeasible of outOfReach){
         for(var price of infeasible.model.prices){
-            var resource = game.resPool.get(price.name);
+            const resource = game.resPool.get(price.name);
             if( resource.maxValue < price.val ){
-                var extraCap = price.val - resource.maxValue;
-                var capIncrease = effects[resource.name + "Max"] || 0;
+                const extraCap = price.val - resource.maxValue;
+                const currentRatioEffect = 1 + game.getEffect(resource.name + "MaxRatio");
+                var capIncrease = (effects[resource.name + "Max"] || 0) * currentRatioEffect;
+                const capIncreaseRatio = effects[resource.name + "MaxRatio"] || 0;
+                if(!capIncrease && !capIncreaseRatio)
+                    continue;
+                if(capIncreaseRatio){
+                    var maxWithNoRatioEffect = resource.maxValue / currentRatioEffect;
+                    var capWithOneRatioEffect = maxWithNoRatioEffect * (1 + capIncreaseRatio);
+                    var extraCapForRatio = capWithOneRatioEffect - maxWithNoRatioEffect;
+                    capIncrease += extraCapForRatio;
+                }
                 var percentOfRequired = Math.min(capIncrease / extraCap, 1);
                 if(percentOfRequired > 0){
                     var infeasibleUtility = buttonUtility(infeasible) / 10;
-                    var extraUtility = infeasibleUtility * percentOfRequired;
-                    //buyableLog.log("%s: Contributes to %s (utility %f) for %f extra utility. Current utility %f", id, buttonId(infeasible), infeasibleUtility.toFixed(4), extraUtility.toFixed(4), utility.toFixed(4))
+                    var extraUtility = infeasibleUtility * percentOfRequired;                    
                     utility += extraUtility;
+                    buyableLog.log(
+                        "%s: Contributes %f %s of %f needed for %s (utility %f) for %f extra utility. utilityForSorageCap %f", 
+                        id, 
+                        capIncrease.toFixed(1), 
+                        resource.name , 
+                        extraCap.toFixed(1) ,
+                        buttonId(infeasible), 
+                        infeasibleUtility.toFixed(4), 
+                        extraUtility.toFixed(4), 
+                        utility.toFixed(4))
                 }
             }
         }
@@ -646,6 +700,7 @@ function jobResourcesMaxed(job){
     return true;
 }
 
+var reassignments = 0;
 function assignJobs(){
     const timeEnter = performance.now();
     var jobNumbers = {assignments: {}, invalidJobs: []};
@@ -657,8 +712,8 @@ function assignJobs(){
         if(j.name == "farmer")
             numPlanned += reservedFarmers;
         // Remove assignments from maxxed out jobs.
-        if(jobResourcesMaxed(j)){
-            //jobLog.log("Waste detection for kittens doing ", j.name , " all kittens doing this will be reallocated.");
+        if(jobResourcesMaxed(j) && numPlanned){
+            jobLog.warn("%s: Triggered waste detection. %i kittens doing job will be reallocated.", j.name, numPlanned);
             numPlanned = 0;
             jobNumbers.invalidJobs.push(j.name)
         }
@@ -689,6 +744,8 @@ function assignJobs(){
         //jobLog.log("Planned to assign ", numPlanned, " for job ", j.name, " currently job has ", j.value, " kittens assigned")
         if(j.value > numPlanned){
             var numToRemove = j.value - numPlanned;
+            // A reassignment is moving a kitten from one job to another.
+            reassignments += numToRemove;
             jobLog.log("Need to remove %i kittens from job %s (assigned %i, planned %i)", numToRemove, jobName, j.value, numPlanned);
             var jobBtn = gamePage.villageTab.buttons.find(b => b.opts.job == j.name);
             if(numPlanned < 1){
@@ -747,10 +804,17 @@ function assignJobs(){
         if(jobNumbers.assignments[jobName])
             executedPlan["Job|" + jobName] = jobNumbers.assignments[jobName];
     }
+
+    if(game.villageTab.optimizeJobsBtn && game.villageTab.optimizeJobsBtn.model.visible){
+        if(reassignments > reassignmentsBeforeOptimise * game.village.getKittens()){
+            reassignments = 0;
+            game.villageTab.optimizeJobsBtn.buttonContent.click();
+        }
+    }
+
     const timeExit = performance.now();
     jobLog.log("assignJobs took %i ms", timeExit - timeEnter);
     // TODO: Partial kittens
-    // TODO: Optimise when required.
 }
 
 //#endregion
@@ -930,6 +994,20 @@ function variableFromCraft(c, outOfReach){
             const utilityPerCraft = craftAmt / shipsPerUtility;
             cv.utility = utilityPerCraft;
         }
+        const cargoShips = game.workshop.get("cargoShips");
+        if(cargoShips.researched){
+            // Buildings.js line ~850
+            //100% to 225% with slow falldown on the 75%
+            var limit = 2.25 + game.getEffect("shipLimit") * game.bld.get("reactor").on;
+            var ratioNow = 1 + game.getLimitedDR(cargoShips.effects["harborRatio"] * builtAlready, limit);
+            var ratioAfterCraft = 1 + game.getLimitedDR(cargoShips.effects["harborRatio"] * (builtAlready + craftAmt), limit);
+            var ratioChange = ratioAfterCraft - ratioNow;
+
+            cv.utility += utilityForSorageCap("ship", outOfReach, {
+                catnipMax: (2500 * ratioChange), woodMax: (700 * ratioChange), mineralsMax: (950 * ratioChange), coalMax: (100 * ratioChange), ironMax: (150 * ratioChange), titaniumMax: (50 * ratioChange), goldMax: (25 * ratioChange)
+            }
+            );
+        }
     } 
     // Manuscript max culture bonus (and may incentivize early temple)
     else if (craft == "manuscript") {
@@ -967,7 +1045,7 @@ function compendiumScienceUtility(outOfReach){
     var compendiaScienceMax = Math.floor(this.game.resPool.get("compedium").value * 10);
 
     // If we haven't capped max science bonus from compendia then we can incentivise making them based on increasing science storage.
-    return compendiaScienceMax < scienceMaxCap ? utilityForSorageCap(outOfReach, {scienceMax: 10}) : 0;
+    return compendiaScienceMax < scienceMaxCap ? utilityForSorageCap("compendia", outOfReach, {scienceMax: 10}) : 0;
 }
 
 function compendiumUtility(outOfReach, craftPrices, craftAmt){
@@ -982,7 +1060,7 @@ function manuscriptUtility(outOfReach){
 		var cultureBonusRaw = Math.floor(game.resPool.get("manuscript").value);
         var additionalMaxCultureFromManuscript = game.getUnlimitedDR(cultureBonusRaw + 1, 0.01) - game.getUnlimitedDR(cultureBonusRaw, 0.01);
         additionalMaxCultureFromManuscript *= 1 + game.getEffect("cultureFromManuscripts");
-        var utility = utilityForSorageCap(outOfReach, {cultureMax: additionalMaxCultureFromManuscript});
+        var utility = utilityForSorageCap("manuscript", outOfReach, {cultureMax: additionalMaxCultureFromManuscript});
         //craftLog.log("additionalMaxCultureFromManuscript %f, utility %f", additionalMaxCultureFromManuscript.toFixed(1), utility.toFixed(4));
         return utility;
 }
@@ -1251,8 +1329,7 @@ function variableFromIncrementableBuilding(bld){
     if(bld.effects && bld.effects.energyConsumption)
         bv.energy = bld.effects.energyConsumption;
 
-    for(effect in effects){        
-        buyableLog.log(effect)
+    for(effect in effects){
         if(effect == "energyProduction"){
             bv.energy = -1 * effects[effect];
             continue;
@@ -1265,11 +1342,11 @@ function variableFromIncrementableBuilding(bld){
             bv.utility = globalProductionUtility * 100 * effects[effect];
         }
         if(! (effect.endsWith('PerTickAutoprod') || effect.endsWith('PerTickCon') || effect.endsWith('PerTick') || effect.endsWith('PerTickBase') )){
-            buyableLog.log("Ignoring effect ", effect, "(not production related)");
+            //buyableLog.log("Ignoring effect ", effect, "(not production related)");
             continue;
         }
         if(effects[effect] == 0) {
-            buyableLog.log("Ignoring effect ", effect, "(zero value)");
+            //buyableLog.log("Ignoring effect ", effect, "(zero value)");
             continue;
         }
         var resName = effect.slice(0, effect.indexOf('PerTick'));
@@ -1316,7 +1393,6 @@ function findHtmlCollection(collection, filterFn){
 
 function executeIncrementableBuilding(){
     for(var toggleableBld of getIncrementableBuildings()) {       
-        buyableLog.log(toggleableBld);
         var desiredOn = plan["IncrementBuilding|" + toggleableBld.name] || 0;
         var bldBtn = gamePage.bldTab.children.find(btn => btn.opts.building == toggleableBld.name)
         var currentlyOn = bldBtn.model.on;
@@ -1325,9 +1401,9 @@ function executeIncrementableBuilding(){
             desiredOn = Math.ceil(desiredOn)
         else 
             desiredOn = Math.floor(desiredOn)
-        buyableLog.log("%s desired on %i", toggleableBld.name, desiredOn);
+        //buyableLog.log("%s desired on %i", toggleableBld.name, desiredOn);
         if(currentlyOn == desiredOn){
-            buyableLog.log("%s currently on %i matches desired on %i", toggleableBld.name, currentlyOn, desiredOn);
+            //buyableLog.log("%s currently on %i matches desired on %i", toggleableBld.name, currentlyOn, desiredOn);
             continue;
         }
 
@@ -1336,18 +1412,18 @@ function executeIncrementableBuilding(){
         var onMultiDiv = findHtmlCollection(onLinksDiv.children, c => c.tagName == "DIV" && c.className == "linkContent")
         var offMultiDiv = findHtmlCollection(offLinksDiv.children, c => c.tagName == "DIV" && c.className == "linkContent")
         if(desiredOn == bldBtn.model.metadata.val){
-            buyableLog.log("Firing up all ", toggleableBld.name)
+            //buyableLog.log("Firing up all ", toggleableBld.name)
             var onAllLink = findHtmlCollection(onMultiDiv.children, l => l.tagName == "A" && l.title == "+all")
             onAllLink.click();
             continue;
         }
         if(desiredOn == 0) {
-            buyableLog.log("Power down all ", toggleableBld.name)
+            //buyableLog.log("Power down all ", toggleableBld.name)
             var offAllLink = findHtmlCollection(offMultiDiv.children, l => l.tagName == "A" && l.title == "-all")
             offAllLink.click();
             continue;
         }
-        buyableLog.log("Moderating number of ", toggleableBld.name, " to ", desiredOn, " from ", currentlyOn)
+        //buyableLog.log("Moderating number of ", toggleableBld.name, " to ", desiredOn, " from ", currentlyOn)
         var changeAmount = Math.abs(currentlyOn - desiredOn);
         if(currentlyOn > desiredOn){
             singleLink = findHtmlCollection(offLinksDiv.children, l => l.tagName == "A")
@@ -1413,6 +1489,7 @@ function evaluateProductionStack(stack, resource, mode, modeVariable){
         else if (resourceModifier.name == "Production" && lastMod == null) {
             switch(mode){
                 case 1:
+                    break;
                 case 3:
                     prod += resourceModifier.value;
                     break;
@@ -1881,6 +1958,27 @@ function leaderDiscountRatio(btn, resName){
 // TODO: Adore
 // TODO: Transcend
 
+function variableForAdoreGalaxy(){
+    if(!gamePage.religionTab.visible ||
+       !gamePage.religionTab.adoreBtn || 
+       !gamePage.religionTab.adoreBtn.model.visible)
+        return null;
+    // Ok Adore is a valid action.
+    const agVar = {
+        name: "AdoreTheGalaxy"
+    };
+    var worship = game.religion.faith
+    var ttPlus1 = (game.religion.getRU("transcendence").on ? game.religion.transcendenceTier : 0) + 1;
+    var currFaithRatio = game.religion.faithRatio;
+    var faithRatioIncrease = worship / 1000000 * ttPlus1 * ttPlus1 * 1.01;
+    var currApocBonus = game.religion.getApocryphaBonus();
+    var newApocBonus = game.getUnlimitedDR(currFaithRatio + faithRatioIncrease, 0.1) * 0.1;
+    var apocBonusIncrease = newApocBonus - currApocBonus;
+
+    var currentSolRevBonus = calculateSolarRevolutionRatio(worship);
+    var currentSolRevUtility = currentSolRevBonus * 100 * globalProductionUtility;
+}
+
 function variableForPraiseSun(){
     if(!gamePage.religionTab.visible)
         return null;
@@ -2094,8 +2192,15 @@ function executeResetLogic(){
     var planningSince = shouldStartResetCountdown();
     if(!planningSince)
         return;
-    var diffMins = (new Date() - planningSince) / (1000 * 60) ;
-    execLog.warn("Planning for reset for last %f mins", diffMins.toFixed(2));
+    const resetTime = addMinutes(planningForResetSince, 10);
+    const timeLeftSecs = (resetTime - new Date()) / 1000;
+    var diffMins = Math.floor(timeLeftSecs / 60);
+    var diffSeconds = Math.floor(timeLeftSecs - (diffMins * 60));
+    if(diffMins)
+        diffMins += " mins"
+    if(diffSeconds)
+        diffSeconds += " seconds"
+    execLog.warn("THE END IS NIGH. Reset incoming in approximately %s %s.", diffMins, diffSeconds);
     if(diffMs > 10)
     {
         execLog.warn("Goodbye cruel world!");
@@ -2104,6 +2209,10 @@ function executeResetLogic(){
             game.religionTab.adoreBtn.click();
         game.reset();
     }
+}
+
+function addMinutes(date, minutes) {
+    return new Date(date.getTime() + minutes*60000);
 }
 
 //#endregion

@@ -324,6 +324,25 @@ function buildModel() {
     logger.log("%s took %ims", "buildModel", timeExit - timeEnter);
     return model;
 }
+
+function segmentPlan(){
+    var sp = {};
+    var notCopied = ["bounded", "feasible", "isIntegral", "result"];
+    for(f in plan){
+        if(notCopied.find(nc => nc == f))
+            continue;
+        var parts = f.split("|");
+        if(parts.length == 1)
+            sp[f] = plan[f];
+        else {
+            if(!sp[parts[0]])
+                sp[parts[0]] = {};
+            sp[parts[0]][parts[1]] = plan[f];
+        }
+    }
+    return sp;
+}
+
 //#endregion Plan
 
 //#region Buyables
@@ -574,18 +593,18 @@ function buyUnderPlan(){
         if(!buyable.startsWith('Build'))
             continue;
         var numToBuy = plan[buyable];
-        if(numToBuy < 1)
+        if(numToBuy < 0.9)
             continue;
         var label = buyable.slice(6);
         var buyButtons = allBuyable.filter(b => buttonId(b) == label);
         if(buyButtons.length != 1){
-            console.warn("Unknown or ambiguous buyable " + buyable + " this action cannot be performed at this time.");
+            buyableLog.warn("Unknown or ambiguous buyable " + buyable + " this action cannot be performed at this time.");
             continue;
         }
         buyButton = buyButtons[0];
         if(canAffordNow(buyButton)){
             var prevLeader = switchLeaderToBuy(buyButton);
-            console.log('Buying ' + label);
+            buyableLog.info('Buying ' + label);
             executedPlan[buyable] = 1;
             //console.debug(buyButton);
             //console.debug(buyButton.buttonContent);
@@ -921,6 +940,7 @@ function variableFromTrade(tradeRace, outOfReach) {
 }
 
 function executeTrades(){
+    // TODO: shuffle trades so we don't always prioritise Griffins.
     for(tradeable in plan) {
         if(!tradeable.startsWith("Trade")){
             continue;
@@ -1470,19 +1490,20 @@ function evaluateProductionStack(stack, resource, mode, modeVariable){
     var prod = 0.0;
     var lastMod = null;
     var effects = modeVariable ? modeVariable.effectsCalculated || modeVariable.effects : null;
-    //console.log(stack)
+
+    simLog.log(stack)
     for(var resourceModifier of stack){
-        //console.debug(prod, resourceModifier)
+        simLog.log(prod, resourceModifier)
         if(resourceModifier instanceof(Array))
             prod += evaluateProductionStack(resourceModifier, resource, mode, modeVariable)
         // These are variable - we want to get production without these effects.
         else if(resourceModifier.name == '(:3) Village'){
-            //console.log("village logic, mode ", mode)
+            simLog.log("village logic, mode ", mode)
             if(mode == 1){
-                //console.log("adding one villager of production", modeVariable.modifiers, modeVariable.modifiers[resource.name])
+                simLog.log("adding one villager of production", modeVariable.modifiers, modeVariable.modifiers[resource.name])
                 prod += (modeVariable.modifiers[resource.name] || 0) * gamePage.village.happiness
             } else {
-                //console.log("ignoring village production")
+                simLog.log("ignoring village production")
                 continue;
             }
         }
@@ -1490,6 +1511,7 @@ function evaluateProductionStack(stack, resource, mode, modeVariable){
             switch(mode){
                 case 1:
                     break;
+                case 0:
                 case 3:
                     prod += resourceModifier.value;
                     break;
@@ -1628,6 +1650,7 @@ function includeLoglevel() {
            window.buyableLog = woodman.getLogger("main.buyable");
            window.jobLog = woodman.getLogger("main.Jobs");
            window.craftLog = woodman.getLogger("main.Craft");
+           window.simLog = woodman.getLogger("main.Simulate");
 
            buyableLog.level = "info";
            jobLog.level = "info";
@@ -2192,27 +2215,50 @@ function executeResetLogic(){
     var planningSince = shouldStartResetCountdown();
     if(!planningSince)
         return;
-    const resetTime = addMinutes(planningForResetSince, 10);
+    const resetTime = addMinutes(planningForResetSince, 20);
     const timeLeftSecs = (resetTime - new Date()) / 1000;
+
+    if(timeLeftSecs <= 0)
+    {
+        execLog.warn("Goodbye cruel world!");
+        // Should always be true I think, but who knows - this code is hard to test ;-)
+        if(game.religionTab.adoreBtn.model.visible)
+            game.religionTab.adoreBtn.buttonContent.click();
+        game.reset();
+        return;
+    }
+
     var diffMins = Math.floor(timeLeftSecs / 60);
     var diffSeconds = Math.floor(timeLeftSecs - (diffMins * 60));
     if(diffMins)
         diffMins += " mins"
     if(diffSeconds)
-        diffSeconds += " seconds"
-    execLog.warn("THE END IS NIGH. Reset incoming in approximately %s %s.", diffMins, diffSeconds);
-    if(diffMs > 10)
-    {
-        execLog.warn("Goodbye cruel world!");
-        // Should always be true I think, but who knows - this code is hard to test ;-)
-        if(game.religionTab.adoreBtn.model.visible)
-            game.religionTab.adoreBtn.click();
-        game.reset();
-    }
+        diffSeconds = " " + diffSeconds + " seconds"
+    else
+        diffSeconds = ""
+    execLog.warn("THE END IS NIGH. Reset incoming in approximately %s%s.", diffMins, diffSeconds);
 }
 
 function addMinutes(date, minutes) {
     return new Date(date.getTime() + minutes*60000);
 }
+
+function shuffle(array) {
+    let currentIndex = array.length,  randomIndex;
+  
+    // While there remain elements to shuffle.
+    while (currentIndex != 0) {
+  
+      // Pick a remaining element.
+      randomIndex = Math.floor(Math.random() * currentIndex);
+      currentIndex--;
+  
+      // And swap it with the current element.
+      [array[currentIndex], array[randomIndex]] = [
+        array[randomIndex], array[currentIndex]];
+    }
+  
+    return array;
+  }
 
 //#endregion

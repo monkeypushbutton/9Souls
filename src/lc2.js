@@ -27,6 +27,16 @@ var jiggleUtility = false;
 // Once we switch job assignments this many times (as a percentage of total kittens), 
 // optimise job assignments using "Manage Jobs" button
 var reassignmentsBeforeOptimise = 0.2;
+// Amount of catnip to reserve in units of "days of consumption". This should be approximately
+// the number of days we can fall into a new season without replanning, plus a little bit for safety?
+// Or even more for safety if you have murdering kittens I suppose.
+// TODO: Script is murdering kittens with gay abandon in cold winters. Once that is fixed, this can be reduced.
+var reservedNipDays = 100;
+
+// Somtimes plan will want two things using similar resources.
+// If plan is to buy greater than this number of an item and we have the resources to do so it can be bought.
+// A bird in the hand is worth 1/buyThreshold in the bush so to speak :)
+var buyThreshold = 0.9;
 
 var eventLoops = {
     execHandle: undefined,
@@ -97,6 +107,9 @@ function executePlanNow(timesBought = 0){
     execLog.log("Executing");
     praiseUnderPlan();
     executeResetLogic();
+    if(!plan){
+        planNow();
+    }
     if(gamePage.calendar.season != plannedSeason){
         execLog.log("Replanning (season)");
         planNow();
@@ -124,6 +137,7 @@ function executePlanNow(timesBought = 0){
     executeIncrementableBuilding();
     executeToggleBuildings();
     sacrificeUnderPlan();
+    doLeaderChangeTrait("manager");
     var bought = false;
     if(timesBought < 5){
         bought = buyUnderPlan();
@@ -210,19 +224,32 @@ function isFeasible(btn){
 }
 
 function canAffordNow(btn){
-    return canAffordHowManyNow(btn) >= 1  || canSwapLeaderToPurchase(btn, false) != null;
+    return canAffordHowManyNow(btn) >= 1;
+}
+
+function isScienceButton(btn){
+    return btn.tab && btn.tab.tabId == "Science";
+}
+
+function isFaithButton(btn){
+    if(btn.model && btn.model.metadata)
+        return game.religion.religionUpgrades.find(ru => ru.name == btn.model.metadata.name);
+    return false;
+}
+
+function isWorkshopButton(btn){
+    return btn.tab && btn.tab.tabId == "Workshop";
 }
 
 function canAffordHowManyNow(btn){
-    limitedAmount = Infinity
+    var limitedAmount = Infinity
     //console.debug("Checking if I can afford ", buttonId(btn))
     for(pe of btn.model.prices){
-        reservedRes = 0
-        if(pe.name == "catnip")
-            reservedRes = reservedNipAmount()
-        resPoolRes = gamePage.resPool.resourceMap[pe.name].value;
-        availableResources = Math.max(resPoolRes - reservedRes, 0)
-        ratio = availableResources / pe.val
+        const reservedRes = pe.name == "catnip" ? reservedNipAmount() : 0;
+        const needed = pe.val * leaderDiscountRatio(btn, pe.name);
+        const resPoolRes = gamePage.resPool.resourceMap[pe.name].value;
+        const availableResources = Math.max(resPoolRes - reservedRes, 0)
+        const ratio = availableResources / needed
         if(ratio < 1) {
             //console.debug("I don't have enough ", pe.name, " need ", pe.val, " have ", availableResources, reservedRes == 0 ? "" : " (not including " + reservedRes + " reserved) ")
             return ratio;
@@ -414,8 +441,7 @@ var baseUtilityMap = {
     factoryAutomation: 0.1,
     advancedAutomation: 0.1,
     barges: 0.2,
-
-    // Resources
+    // I hate zebras for good reason
     oxidation: 15,
 
     // Making more huts is v.g.
@@ -424,10 +450,14 @@ var baseUtilityMap = {
     unobtainiumHuts: 20,
     eludiumHuts: 20,
 
+    // Trade
+    // Incentivise sharks over lizards. Manuscripts for early game.
+    sharksEmbassy: 0.7,
+
     // Science
     // In game description is accurate.
     socialism: 0.0001,
-    // Script spends a lot of time with capped buildings, republic is *probably* better.
+    // Script spends a lot of time with capped pop buildings, republic is *probably* better.
     // authocracy: 0.9,
 
     // Faith
@@ -437,8 +467,15 @@ var baseUtilityMap = {
     ivoryTower: 6,
 
     // Bonfire
+    // Nip production is ass outside the very early game.
+    field: 0.6,
+    pasture: 0.5,
+    aqueduct: 0.6,
+
+    // General advice is to build these often, crafting is v. important
     workshop: 3,
     // Pop
+    // Highly useful - pretty much always
     hut: 5,
     logHouse: 2.5,
     mansion: 2.5,
@@ -456,29 +493,43 @@ var baseUtilityMap = {
 };
 
 function buttonUtility(btn, outOfReach = null){
-    const timeEnter = performance.now();
     var id = buttonId(btn)
     // Faith upgrades are pretty important, as are science and workshop.
     // Incentivise them as they tend to look expensive to the optimiser.
     var mappedUtility = baseUtilityMap[id];
     var utility = mappedUtility || 1;
-    if(btn.model.prices.find(p => p.name == "faith"))
+    if(isFaithButton(btn))
         utility = mappedUtility || 5;
-    else if(btn.tab && btn.tab.tabId == "Science")
+    else if(isScienceButton(btn))
         utility = mappedUtility || 15;
-    else if(btn.tab && btn.tab.tabId == "Workshop")
+    else if(isWorkshopButton(btn))
         utility = mappedUtility || 12;
     // Embassies have diminishing returns.
     else if(btn.race){
         // TODO: Should Embassy returns be based somewhat on unlocks?
-        var baseutility = mappedUtility || 0.75;
+        var baseutility = mappedUtility || 0.4;
+        buyableLog.log("%s: Embassy base utility %f", id, baseutility.toFixed(2));
         const builtAlready = btn.model.metadata.val;        
-        utility = baseutility - (diminishingReturns ? game.getLimitedDR(builtAlready, baseutility) : 0);
+        if(btn.race.sells.find(s => s.minLevel && s.minLevel > builtAlready)){            
+            baseutility *= 1.6;
+            buyableLog.log("%s: Bonus applied for unlocking goods %f", id, baseutility.toFixed(2));
+        }
+        if(diminishingReturns){
+            utility = baseutility - (diminishingReturns ? game.getLimitedDR(builtAlready, baseutility) : 0);
+            buyableLog.log("%s: Penalty for diminishing returns applied %f", id, utility.toFixed(2));
+        } else {
+            utility = baseutility;
+        }
     }
     else if(gamePage.bld.buildingsData.find(bd => bd.name == id)) {
         var baseutility = mappedUtility || 1;
         if(id == "steamworks" && !gamePage.bld.get("magneto").val){
             baseutility = 0.2;
+        }
+        if((id == "mine" || id == "workshop" || id == "library" || id == "temple") && btn.model.metadata.val == 0){
+            // Incentive for unlock chain Mine => Miner => Workshop & anything to do with minerals i.e. most of the game
+            baseutility *= 2.5;
+            buyableLog.log("%s: Incentive applied for first building %f", id, baseutility.toFixed(2));
         }
         buyableLog.log("%s: Base utility: %f", id, baseutility.toFixed(2));
         if (id == "oilWell") {
@@ -519,9 +570,16 @@ function buttonUtility(btn, outOfReach = null){
     //buyableLog.log("%s: Final utility including jitter %s", id, utility.toFixed(4))
     //if(outOfReach)
         // console.timeEnd("buttonUtility")
-    const timeExit = performance.now();
-    buyableLog.log("buttonUtility took %i ms", timeExit - timeEnter);
     return utility;
+}
+
+function debugButtonUtility(btnName){
+    const btn = getBuyables().find(b => buttonId(b) == btnName);
+    if(!btn){
+        return "Unknown button " + btnName;
+    }        
+    const oor = getBuyables(false);
+    return debug(() => buttonUtility(btn, oor), buyableLog);
 }
 
 // Work in progress
@@ -555,6 +613,7 @@ function utilityForSorageCap(id, outOfReach, effects){
                 const extraCap = price.val - resource.maxValue;
                 const currentRatioEffect = 1 + game.getEffect(resource.name + "MaxRatio");
                 var capIncrease = (effects[resource.name + "Max"] || 0) * currentRatioEffect;
+                capIncrease *= 1 + game.prestige.getParagonStorageRatio();
                 const capIncreaseRatio = effects[resource.name + "MaxRatio"] || 0;
                 if(!capIncrease && !capIncreaseRatio)
                     continue;
@@ -593,7 +652,7 @@ function buyUnderPlan(){
         if(!buyable.startsWith('Build'))
             continue;
         var numToBuy = plan[buyable];
-        if(numToBuy < 0.9)
+        if(numToBuy < buyThreshold)  
             continue;
         var label = buyable.slice(6);
         var buyButtons = allBuyable.filter(b => buttonId(b) == label);
@@ -605,6 +664,7 @@ function buyUnderPlan(){
         if(canAffordNow(buyButton)){
             var prevLeader = switchLeaderToBuy(buyButton);
             buyableLog.info('Buying ' + label);
+            game.msg('9Souls: Buying ' + buttonLabel(buyButton));
             executedPlan[buyable] = 1;
             //console.debug(buyButton);
             //console.debug(buyButton.buttonContent);
@@ -721,6 +781,7 @@ function jobResourcesMaxed(job){
 
 var reassignments = 0;
 function assignJobs(){
+    // TODO: Emergency farming if catnip < reservedAmount & gain per sec < 0
     const timeEnter = performance.now();
     var jobNumbers = {assignments: {}, invalidJobs: []};
     var kittensAssigned = 0;
@@ -983,12 +1044,12 @@ function getCrafts(){
 }
 
 function variableFromCraft(c, outOfReach){
-    //craftLog.log(c, outOfReach);
     craft = c.craftName || 'wood'
     cv = {
         name: "Craft|" + craft
     };
     var craftAmt = (1 + game.getResCraftRatio(craft) + craftBonusForLeaderSwitch(craft) - currentLeaderCraftBonus(craft))
+    craftLog.log(craft + " craftAmt " + craftAmt)
     cv[craft] = -craftAmt;
     var craftPrices = game.workshop.getCraftPrice(c.model);
     for(price of craftPrices){
@@ -997,11 +1058,13 @@ function variableFromCraft(c, outOfReach){
     if(craft == "wood" && game.bld.buildingsData.find(b => b.name == 'hut').val < 1){
         // We don't even have a hut yet, how quaint, we should do a little refining
         cv.utility = 1
+        craftLog.log("wood craft utility: " + cv.utility)
     }
     // Mild bonus for unlock ziggurat
     else if(craft == "megalith" || craft == "scaffold"){ 
         if(!game.bld.get("ziggurat").unlocked && game.resPool.get(craft).value == 0){
             cv.utility = 0.01;
+            craftLog.log(craft + " craft utility: " + cv.utility)
         }
     }
     // Ships are good, up to a point ;-)
@@ -1013,6 +1076,7 @@ function variableFromCraft(c, outOfReach){
             const shipsPerUtility = builtAlready * fractionofShipsPerUtility;
             const utilityPerCraft = craftAmt / shipsPerUtility;
             cv.utility = utilityPerCraft;
+            craftLog.log("ship craft utility: " + cv.utility)
         }
         const cargoShips = game.workshop.get("cargoShips");
         if(cargoShips.researched){
@@ -1023,24 +1087,33 @@ function variableFromCraft(c, outOfReach){
             var ratioAfterCraft = 1 + game.getLimitedDR(cargoShips.effects["harborRatio"] * (builtAlready + craftAmt), limit);
             var ratioChange = ratioAfterCraft - ratioNow;
 
-            cv.utility += utilityForSorageCap("ship", outOfReach, {
+            var shipStorageUtility = utilityForSorageCap("ship", outOfReach, {
                 catnipMax: (2500 * ratioChange), woodMax: (700 * ratioChange), mineralsMax: (950 * ratioChange), coalMax: (100 * ratioChange), ironMax: (150 * ratioChange), titaniumMax: (50 * ratioChange), goldMax: (25 * ratioChange)
             }
             );
+            cv.utility += shipStorageUtility;
+            craftLog.log("ship utility for storage: " + shipStorageUtility + " total ship craft utility" + cv.utility )
         }
     } 
     // Manuscript max culture bonus (and may incentivize early temple)
     else if (craft == "manuscript") {
         cv.utility = manuscriptUtility(outOfReach) * craftAmt;
+        craftLog.log("manuscript craft utility: " + cv.utility)
+        if(!game.resPool.get(craft).value){
+            cv.utility += 1
+            craftLog.log("Bumping manuscript for initial manuscript: " + cv.utility)
+        }
     } 
     // compendium max science bonus minus penalty for losing manuscripts
     // nice typo in the craft name BTW
     else if (craft == "compedium") {
         cv.utility = compendiumUtility(outOfReach, craftPrices, craftAmt);
+        craftLog.log("compendium craft utility: " + cv.utility)
     }
     // blueprints lose compendia :-(
     else if (craft == "blueprint") {
         cv.utility = blueprintUtility(outOfReach, craftPrices);
+        craftLog.log("blueprint craft utility: " + cv.utility)
     }
     return cv;
 }
@@ -1071,7 +1144,7 @@ function compendiumScienceUtility(outOfReach){
 function compendiumUtility(outOfReach, craftPrices, craftAmt){
     var scienceUtility = compendiumScienceUtility(outOfReach);
     var manuscriptUtilityLost = manuscriptUtility(outOfReach) * craftPrices.find(cp => cp.name == "manuscript").val;
-    //craftLog.log("scienceUtility %f, manuscriptUtilityLost %f", scienceUtility.toFixed(4), manuscriptUtilityLost.toFixed(4));
+    craftLog.log("scienceUtility %f, manuscriptUtilityLost %f", scienceUtility.toFixed(4), manuscriptUtilityLost.toFixed(4));
     return (scienceUtility * craftAmt) - manuscriptUtilityLost;
 }
 
@@ -1081,39 +1154,41 @@ function manuscriptUtility(outOfReach){
         var additionalMaxCultureFromManuscript = game.getUnlimitedDR(cultureBonusRaw + 1, 0.01) - game.getUnlimitedDR(cultureBonusRaw, 0.01);
         additionalMaxCultureFromManuscript *= 1 + game.getEffect("cultureFromManuscripts");
         var utility = utilityForSorageCap("manuscript", outOfReach, {cultureMax: additionalMaxCultureFromManuscript});
-        //craftLog.log("additionalMaxCultureFromManuscript %f, utility %f", additionalMaxCultureFromManuscript.toFixed(1), utility.toFixed(4));
+        craftLog.log("additionalMaxCultureFromManuscript %f, utility %f", additionalMaxCultureFromManuscript.toFixed(1), utility.toFixed(4));
         return utility;
 }
 
 function executeCrafts(){
-    craftButtons = getCrafts();
+    const craftButtons = getCrafts();
     for(craftable in plan) {
         if(!craftable.startsWith("Craft")){
             continue;
         }
-        alreadyDone = executedPlan[craftable] || 0;
-        numDesiredRemaining = Math.ceil(plan[craftable] - alreadyDone);
-        if(numDesiredRemaining < 1)
+        const alreadyDone = executedPlan[craftable] || 0;
+        const totalNumDesiredRemaining = (plan[craftable] || 0) - alreadyDone;
+        var numDesiredRemaining = Math.floor(totalNumDesiredRemaining);
+        if((totalNumDesiredRemaining - numDesiredRemaining) > buyThreshold)
+            numDesiredRemaining += 1;
+        if(numDesiredRemaining <= 0)
             continue;
-        craftName = craftable.slice(6);
-        //console.log(craftable, craftName, alreadyDone, numDesiredRemaining);
-        btn = craftButtons.find(btn => (btn.opts.craft || "wood") == craftName);
+        const craftName = craftable.slice(6);
+        craftLog.log(craftable, craftName, alreadyDone, numDesiredRemaining);
+        const btn = craftButtons.find(btn => (btn.opts.craft || "wood") == craftName);
         if(!btn){
             craftLog.warn("Couldn't locate craft button for ", craftName, ". WTF?");
             continue;
         }
-        numCanAfford = canAffordHowManyNow(btn);
+        const numCanAfford = canAffordHowManyNow(btn);
         if(numCanAfford < 1)
             continue;
-        numToActuallyCraft = Math.floor(Math.min(numCanAfford, numDesiredRemaining))
+        const numToActuallyCraft = Math.floor(Math.min(numCanAfford, numDesiredRemaining))
         if(numToActuallyCraft < 1)
             continue;
         
-        var oldLeader = switchLeaderToCraft(craftName);
+        switchLeaderToCraft(craftName);
         craftLog.log("Crafting %i %s (%i/%f)", numToActuallyCraft, craftName, alreadyDone + numToActuallyCraft, plan[craftable].toFixed(2))
         executedPlan[craftable] = alreadyDone + numToActuallyCraft;
         game.workshop.craft(craftName, numToActuallyCraft)
-        changeLeader(oldLeader);
     }
 }
 
@@ -1469,14 +1544,30 @@ function executeIncrementableBuilding(){
 
 //#region Simulate Production
 function resoucePerTick(res, mode = 0, modeVariable = null) {
-    //console.log("resoucePerTick(%s, %i, %s)", res.name, mode, buttonId(modeVariable))
+    simLog.log("resoucePerTick(%s, %i, %s)", res.name, mode, buttonId(modeVariable))
     var productionStack = game.getResourcePerTickStack(res.name, false, game.calendar.season);
     if(mode == 3 && res.name == "coal"){
         if(productionStack.find(s => s.name == "Steamworks") == null){
             productionStack.splice(8, 0, {name: "Steamworks", type: "ratio", value: modeVariable.effects.coalRatioGlobal});
         }
     }
-    return evaluateProductionStack(productionStack, res, mode, modeVariable)
+    var resPerTick = evaluateProductionStack(productionStack, res, mode, modeVariable)
+    simLog.log("resoucePerTick(%s, %i, %s) = %f", res.name, mode, buttonId(modeVariable), resPerTick.toFixed(3))
+    return resPerTick;
+}
+
+function debugProdStack(resName, mode, modeVarName){
+    var res = game.resPool.get(resName);
+    modeVar = null;
+    switch(mode){
+        case 1:
+            modeVar = getJobAssignments().find(ja => ja.name == modeVarName);
+            break;
+        case 2:
+        case 3:
+            modeVar = gamePage.bld.get(modeVarName);
+    }
+    return debug(() => resoucePerTick(res, mode, modeVar), simLog);
 }
 
 /*
@@ -1510,6 +1601,7 @@ function evaluateProductionStack(stack, resource, mode, modeVariable){
         else if (resourceModifier.name == "Production" && lastMod == null) {
             switch(mode){
                 case 1:
+                    simLog.log("ignoring fixed production")
                     break;
                 case 0:
                 case 3:
@@ -1602,13 +1694,11 @@ function projectResourceAmount(res) {
         return projected;
 }
 
-// Reserve half a season season of nip
-// TODO: Is the below TODO still true?
-// TODO: reservedNipAmount is way too conservative. In spring we can reserve far far less for example.
+// Reserve several days of nip
 function reservedNipAmount(){
     var nipDemandRatio = 1 + gamePage.globalEffectsCached.catnipDemandRatio;
     var ktns = gamePage.resPool.resourceMap["kittens"].value ;
-    return ktns * nipDemandRatio * gamePage.village.happiness * 4 * 100 
+    return ktns * nipDemandRatio * gamePage.village.happiness * 4 * reservedNipDays 
 }
 
 //#endregion
@@ -1655,6 +1745,7 @@ function includeLoglevel() {
            buyableLog.level = "info";
            jobLog.level = "info";
            craftLog.level = "info";
+           simLog.level = "info"
 
            logger.log("woodman downloaded and executed");
         }
@@ -1668,22 +1759,6 @@ includeLoglevel();
 
 //#region Leadership
 
-// TODO: Make Leader a manager almost all the time and make this be the kitten that gets ranks.
-// We will then swap to scientist / philosopher only when this enables an option to buy an upgrade (or plan to buy one).
-// We already use artisan / chemist / mettalurgist exactly when needed, see executeCrafts.
-
-// function canLeaderChangeMakeFeasible(trait){
-//     if(!game.science.get("civil").researched)
-//         return false;
-//     outOfReach = getBuyables(false)
-//     scienceMax = game.resPool.get("science").maxValue
-//     for(infeasible of outOfReach) {
-
-//     }
-//     faithMax = game.resPool.get("faith").maxValue
-// }
-
-
 function civilServiceNotResearched(){
     return !game.science.get("civil").researched;
 }
@@ -1691,7 +1766,18 @@ function civilServiceNotResearched(){
 function kittenWithTrait(desiredTrait){
     if(civilServiceNotResearched())
         return null;
-    return game.village.sim.kittens.find(k => k.trait && k.trait.name == desiredTrait);
+    var candidates = game.village.sim.kittens.filter(k => k.trait && k.trait.name == desiredTrait);
+    if(!candidates.length)
+        return null;
+    var bestBoi = null;
+    var bestRank = -1;
+    for(var idx = 0; idx < candidates.length; idx++){
+        if(candidates[idx].rank > bestRank){
+            bestBoi = candidates[idx];
+            bestRank = bestBoi.rank;
+        }
+    }
+    return bestBoi;
 }
 
 // NB: Return old leader in case we need to undo the change
@@ -1965,13 +2051,26 @@ function leaderDiscountRatio(btn, resName){
     if (this.game.science.getPolicy("monarchy").researched){
         leaderRatio = 1.95;
     }
-    if(btn.tab && (btn.tab.id == "Workshop" && btn.tab.id == "Science") && resName == "science" && kittenWithTrait("scientist")) {
+    if((isWorkshopButton(btn) || isScienceButton(btn)) && 
+        resName == "science" && 
+        kittenWithTrait("scientist") &&
+        leaderTrait() != "scientist") {
         return 1 - (game.getLimitedDR(0.05 * burnedParagonRatio  * leaderRatio, 1.0));
-    } else if(game.religion.religionUpgrades.find(ru => ru.name == btn.model.metadata.name) && (resName == "faith" || resName == "gold") && kittenWithTrait("wise")) {
+    } else if(
+        isFaithButton(btn) && 
+        (resName == "faith" || resName == "gold") && 
+        kittenWithTrait("wise") &&
+        leaderTrait() != "wise") {
         return 1 - (game.getLimitedDR((0.09 + 0.01 * burnedParagonRatio) * leaderRatio, 1.0));
     } else {
         return 1;
     }
+}
+
+function leaderTrait(){
+    if(game.village.leader && game.village.leader.trait)
+        return game.village.leader.trait.name;
+    return "";
 }
 
 //#endregion
@@ -2101,7 +2200,21 @@ function sacrificeUnderPlan(){
 //#region Utilities
 
 // Get an identifiable id string for a button to tie solver together with buttons in ui
+function debug(f, logger){
+    const origLevel = logger.level;
+    logger.level = "all";
+    const timeEnter = performance.now();
+    var rv = f();
+    const timeExit = performance.now();
+    logger.log("Took %i ms", (timeExit - timeEnter));
+    logger.level = origLevel;
+    if(rv)
+        return rv;
+}
+
 function buttonId(btn){
+    if(!btn)
+        return "null";
     if(btn.name)
         return btn.name;
     if(btn.race)
@@ -2112,6 +2225,22 @@ function buttonId(btn){
         return btn.opts.id;
     return btn.opts.name;
 }
+
+function buttonLabel(btn){
+    if(!btn)
+        return "null";
+    if(btn.model && btn.model.metadata && btn.model.metadata.label){
+        var baseLabel = btn.model.metadata.label;
+        if(btn.race){
+            return btn.race.title + " " + baseLabel;
+        } else {
+            return baseLabel;
+        }
+    } else {
+        return buttonId(btn);
+    }
+}
+
 
 function plannedUtilities(onlyBuildables = true, topN = 5, orderBy = "quantityChange"){
     var pu = [];
@@ -2184,6 +2313,62 @@ function clone(obj){
     return JSON.parse(JSON.stringify(obj));
 }
 
+function shuffle(array) {
+    let currentIndex = array.length,  randomIndex;
+  
+    // While there remain elements to shuffle.
+    while (currentIndex != 0) {
+  
+      // Pick a remaining element.
+      randomIndex = Math.floor(Math.random() * currentIndex);
+      currentIndex--;
+  
+      // And swap it with the current element.
+      [array[currentIndex], array[randomIndex]] = [
+        array[randomIndex], array[currentIndex]];
+    }
+  
+    return array;
+  }
+
+// https://stackoverflow.com/questions/25888963/min-by-max-by-equivalent-functions-in-javascript
+// const pluck = function(object, plucker) {
+//     const t = typeof plucker;
+//     switch (t) {
+//       case 'function':
+//         return plucker(object)
+//       case 'number':
+//       case 'string':
+//         return object[plucker]
+//       default:
+//         throw new TypeError(`Invalid type for pluck: ${t}`)
+//     }
+//   }
+
+//   Array.prototype.extremumBy = function(plucker, extremum) {
+//     return this.reduce(function(best, next) {
+//       var pair = [ pluck(next, plucker), next ];
+//       if (!best) {
+//         return pair;
+//      } else if (extremum.apply(null, [ best[0], pair[0] ]) == best[0]) {
+//         return best;
+//      } else {
+//         return pair;
+//      }
+//    },null)[1];
+//  }
+
+//  // the only difference between minBy and maxBy is the ordering
+// // function, so abstract that out
+// Array.prototype.minBy = function(fn) { 
+//     return this.extremumBy(fn, Math.min); 
+//   };
+  
+//   Array.prototype.maxBy = function(fn) { 
+//     return this.extremumBy(fn, Math.max);
+//   };
+  
+      
 //#endregion Utilities
 
 //#region Reset
@@ -2242,23 +2427,5 @@ function executeResetLogic(){
 function addMinutes(date, minutes) {
     return new Date(date.getTime() + minutes*60000);
 }
-
-function shuffle(array) {
-    let currentIndex = array.length,  randomIndex;
-  
-    // While there remain elements to shuffle.
-    while (currentIndex != 0) {
-  
-      // Pick a remaining element.
-      randomIndex = Math.floor(Math.random() * currentIndex);
-      currentIndex--;
-  
-      // And swap it with the current element.
-      [array[currentIndex], array[randomIndex]] = [
-        array[randomIndex], array[currentIndex]];
-    }
-  
-    return array;
-  }
 
 //#endregion

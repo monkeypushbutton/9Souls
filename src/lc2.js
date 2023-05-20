@@ -1,3 +1,5 @@
+
+
 // TODO: Kittens massacre in year 1 due to building too many huts. Sad but not a deal breaker.
 // TODO: UI often doesn't refresh after script takes an action. Smelters going on and off are a case in point.
 // TODO: Pollution
@@ -492,6 +494,11 @@ var baseUtilityMap = {
     unicornPasture: 0.5
 };
 
+function isPolicy(btn){
+    const btnId = (typeof btn == 'object') ? buttonId(btn) : btn;
+    return game.science.policies.find(p => p.name == btnId)
+}
+
 function buttonUtility(btn, outOfReach = null){
     var id = buttonId(btn)
     // Faith upgrades are pretty important, as are science and workshop.
@@ -504,6 +511,8 @@ function buttonUtility(btn, outOfReach = null){
         utility = mappedUtility || 15;
     else if(isWorkshopButton(btn))
         utility = mappedUtility || 12;
+    else if (isPolicy(btn))
+        utility = mappedUtility || 2;
     // Embassies have diminishing returns.
     else if(btn.race){
         // TODO: Should Embassy returns be based somewhat on unlocks?
@@ -521,10 +530,19 @@ function buttonUtility(btn, outOfReach = null){
             utility = baseutility;
         }
     }
-    else if(gamePage.bld.buildingsData.find(bd => bd.name == id)) {
+    else if(gamePage.bld.get(id)) {
         var baseutility = mappedUtility || 1;
-        if(id == "steamworks" && !gamePage.bld.get("magneto").val){
-            baseutility = 0.2;
+        if(id == "steamworks"){
+            if(game.bld.get("magneto").val > 0){
+                baseutility = 1.2 
+                buyableLog.log("%s: Steamworks specific logic (post magneto) baseutility: %f", id, baseutility.toFixed(2));
+            } else if (game.workshop.get("printingPress").researched) {
+                baseUtility = 0.8
+                buyableLog.log("%s: Steamworks specific logic (post printingPress) baseutility: %f", id, baseutility.toFixed(2));
+            } else {
+                baseutility = 0.2;
+                buyableLog.log("%s: Steamworks specific logic (naked) baseutility: %f", id, baseutility.toFixed(2));
+            }
         }
         if((id == "mine" || id == "workshop" || id == "library" || id == "temple") && btn.model.metadata.val == 0){
             // Incentive for unlock chain Mine => Miner => Workshop & anything to do with minerals i.e. most of the game
@@ -1072,7 +1090,10 @@ function variableFromCraft(c, outOfReach){
         const maxShips = 5000;
         const fractionofShipsPerUtility = 0.15;
         const builtAlready = game.resPool.get("ship").value;
-        if(builtAlready < maxShips){
+        if(builtAlready == 0) {
+            cv.utility = 5;
+            craftLog.log("Initial ship craft utility: " + cv.utility)
+        } else if(builtAlready < maxShips){
             const shipsPerUtility = builtAlready * fractionofShipsPerUtility;
             const utilityPerCraft = craftAmt / shipsPerUtility;
             cv.utility = utilityPerCraft;

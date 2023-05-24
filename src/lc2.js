@@ -15,9 +15,12 @@
 
 // TODO: Kittens massacre in year 1 due to building too many huts. Sad but not a deal breaker.
 // TODO: UI often doesn't refresh after script takes an action. Smelters going on and off are a case in point.
-// TODO: Pollution
-// TODO: Space
-// TODO: Upgrade
+// TODO: Pollution. Incentivise not increasing levels.
+// TODO: Space haven't got there in playthroughs yet
+// TODO: Upgradable builings (solar farm etc)
+// TODO: Lazy crafting. Only perform desired crafts when resources near limit, or in process of actually using them
+// Rationale: We might happen to improve craft efficiency first and hence will end up being more efficient overall.
+// especially noticable with Tears via Ziggurats, but generally seems a sound idea.
 
 // TODO: Check if below TODO is still valid after resCap constraints?
 // TODO: LP Still wants to assign kittens to e.g. scientist when resource is at max at certain points. I'm manually correcting for it right now, which sucks.
@@ -54,6 +57,27 @@
     // If plan is to buy greater than this number of an item and we have the resources to do so it can be bought.
     // A bird in the hand is worth 1/buyThreshold in the bush so to speak :)
     var buyThreshold = 0.9;
+
+    // Basic incentives to buy things - see also baseUtilityMap for specific incentives
+    var baseUtility = 1;
+    var faithUtility = 5;
+    var scienceUtility = 15;
+    var workshopUtility = 12;
+    var policyUtility = 2;
+    var embassyUtility = 0.4;
+    var bldUtility = 0.95;
+
+    // How much additional utility is granted for expanding storage to build things that are currently 
+    // out of reach (as a multiplier of the basic utility of the infeasible thing)
+    var utilityFactorForInfeasible = 0.075;
+
+    // Toggle logic to try and stop script from assiging kittens to dead jobs.
+    // May cause longer term deadlocks when science gets evently split between jobs making little progress?
+    // 0 = off completely, max amount of resources not considered when planning e.g. job allocation.
+    // < 1 Highly not recommended
+    // 1 Resources constrainted to max value in utility function.
+    // > 1 Multiply resource cap by this and use that as constraint, kind of a half way house.
+    var contrainResourceCap = 0;
 
     var eventLoops = {
         execHandle: undefined,
@@ -331,9 +355,9 @@
                     max: projectResourceAmount(res)
                 }
             }
-            if(res.maxValue){
+            if(res.maxValue && contrainResourceCap){
                 model.constraints[res.name + "Cap"] = {
-                    max: res.maxValue
+                    max: res.maxValue * contrainResourceCap
                 }
             }
         }
@@ -362,6 +386,9 @@
         var festVariable = variableForFestival();
         if(festVariable){
             model.variables[festVariable.name] = festVariable;
+        }
+        if(game.science.get("electricity").researched){
+            model.constraints.energy = {max: 0}
         }
         reservedFarmers = reserveFarmers();
         model.constraints.kittens.max -= reservedFarmers;
@@ -448,7 +475,8 @@
         for(pe of btn.model.prices){
             const price = pe.val * leaderDiscountRatio(btn, pe.name);
             variable[pe.name] = price;
-            variable[pe.name + "Cap"] = price;
+            if(contrainResourceCap)
+                variable[pe.name + "Cap"] = price;
         }
         return variable;
     }
@@ -520,19 +548,19 @@
         // Faith upgrades are pretty important, as are science and workshop.
         // Incentivise them as they tend to look expensive to the optimiser.
         var mappedUtility = baseUtilityMap[id];
-        var utility = mappedUtility || 1;
+        var utility = mappedUtility || baseUtility;
         if(isFaithButton(btn))
-            utility = mappedUtility || 5;
+            utility = mappedUtility || faithUtility;
         else if(isScienceButton(btn))
-            utility = mappedUtility || 15;
+            utility = mappedUtility || scienceUtility;
         else if(isWorkshopButton(btn))
-            utility = mappedUtility || 12;
+            utility = mappedUtility || workshopUtility;
         else if (isPolicy(btn))
-            utility = mappedUtility || 2;
+            utility = mappedUtility || policyUtility;
         // Embassies have diminishing returns.
         else if(btn.race){
             // TODO: Should Embassy returns be based somewhat on unlocks?
-            var baseutility = mappedUtility || 0.4;
+            var baseutility = mappedUtility || embassyUtility;
             buyableLog.log("%s: Embassy base utility %f", id, baseutility.toFixed(2));
             const builtAlready = btn.model.metadata.val;        
             if(btn.race.sells.find(s => s.minLevel && s.minLevel > builtAlready)){            
@@ -547,7 +575,7 @@
             }
         }
         else if(isBuilding(id)) {
-            var baseutility = mappedUtility || 1;
+            var baseutility = mappedUtility || bldUtility;
             if(id == "steamworks"){
                 if(game.bld.get("magneto").val > 0){
                     baseutility = 1.2 
@@ -659,7 +687,7 @@
                     }
                     var percentOfRequired = Math.min(capIncrease / extraCap, 1);
                     if(percentOfRequired > 0){
-                        var infeasibleUtility = buttonUtility(infeasible) / 10;
+                        var infeasibleUtility = buttonUtility(infeasible) * utilityFactorForInfeasible;
                         var extraUtility = infeasibleUtility * percentOfRequired;                    
                         utility += extraUtility;
                         buyableLog.log(
@@ -816,14 +844,18 @@
         // TODO: Emergency farming if catnip < reservedAmount & gain per sec < 0
         var planned = {}
         var assignments = {}
-        var invalidJobs = []
+        var invalidJobs = [];
         var partials = {}
-        var wastedKittens= 0
-        var partialKittens= 0
+        var wastedKittens = 0;
+        var partialKittens = 0;
         
         jobLog.log("getJobAssignments start");
         const jobs = getJobAssignments();
         jobLog.log("analyse start", jobs);
+        jobLog.log("planned: ", planned);
+        jobLog.log("assignments: ", assignments);
+        jobLog.log("invalidJobs: ", invalidJobs);
+        jobLog.log("partials: ", partials);
         // remove kittens from jobs 
         for(var j of jobs){
             var numPlanned = plan["Job|" + buttonId(j)] || 0;
@@ -831,7 +863,7 @@
                 numPlanned += reservedFarmers;
             planned[j.name] = numPlanned;
             var intPlanned = Math.floor(numPlanned);
-            const partial = numPlanned - intPlanned;
+            var partial = numPlanned - intPlanned;
             partialKittens += partial;
             // Remove assignments from maxxed out jobs.
             if(jobResourcesMaxed(j) && intPlanned){
@@ -846,7 +878,11 @@
                 partials[j.name] = partial;
             }
         }
-        jobLog.log("analyse complete", planned, assignments);
+        jobLog.log("analyse complete");
+        jobLog.log("planned: ", planned);
+        jobLog.log("assignments: ", assignments);
+        jobLog.log("invalidJobs: ", invalidJobs);
+        jobLog.log("partials: ", partials);
     
         // Reassign wasted based on existing ratios...
         if(wastedKittens){
@@ -877,7 +913,7 @@
                     cumProb += resassignProbs[jobName];
                     if(rj < cumProb){
                         jobLog.log("Assigning wasted kitten %i to %s (random %f, cumProb %f)", kIdx, jobName, rj.toFixed(2), cumProb.toFixed(2));
-                        assignments[j.name] = assignments[j.name] + 1;
+                        assignments[jobName] = assignments[jobName] + 1;
                         break;
                     }
                 }

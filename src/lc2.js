@@ -28,7 +28,10 @@
 // NB: Season is ~ 200 seconds long. 
 
 //(function() {
-    var executeIntervalSeconds = 20;
+    // How long between executions of plan. 
+    // Setting this too low will be spammy and may slow game.
+    // Setting too high may cause missed observations, more 0 / max resource inefficiencies etc.
+    var executeIntervalSeconds = 5;
 
     // How much history should we keep?
     var planHistory = 5;
@@ -486,6 +489,7 @@
         // Workshop
         factoryAutomation: 0.1,
         advancedAutomation: 0.1,
+        pneumaticPress: 0.1,
         barges: 0.2,
         // I hate zebras for good reason
         oxidation: 15,
@@ -867,7 +871,7 @@
             partialKittens += partial;
             // Remove assignments from maxxed out jobs.
             if(jobResourcesMaxed(j) && intPlanned){
-                jobLog.warn("%s: Triggered waste detection. %i kittens doing job will be reallocated.", j.name, numPlanned);
+                jobLog.log("%s: Triggered waste detection. %i kittens doing job will be reallocated.", j.name, numPlanned);
                 wastedKittens += intPlanned;
                 assignments[j.name] = 0;
                 partials[j.name] = 0;
@@ -905,7 +909,7 @@
                     resassignProbs[jobName] = 1 / jobs.length;
                 }                        
             }
-            jobLog.log("Reassigning %i wasted kittens", wastedKittens, resassignProbs);
+            jobLog.log("Reassigning %f wasted kittens, totalProb %f", wastedKittens, Object.values(resassignProbs).reduce((prev, curr) => prev + curr).toFixed(4), resassignProbs);
             for(var kIdx = 0; kIdx < wastedKittens; kIdx++){
                 var rj = Math.random();
                 var cumProb = 0;
@@ -935,10 +939,11 @@
             }
     
             for(var j of jobs){
-                resassignProbs[j.name] = partials[j.name] / partialKittens;
+                resassignProbs[j.name] = partials[j.name] / validPartials;
             }
-            jobLog.log("Reassigning %f partial kittens", partialKittens, resassignProbs);
-            for(var kIdx = 0; kIdx < partialKittens + 0.1; kIdx++){
+
+            jobLog.log("Reassigning %f partial kittens, totalProb %f", partialKittens, Object.values(resassignProbs).reduce((prev, curr) => prev + curr).toFixed(4), resassignProbs);
+            for(var kIdx = 1; kIdx < partialKittens + 0.1; kIdx++){
                 var rj = Math.random();
                 var cumProb = 0;
                 for(var jobName in resassignProbs){
@@ -957,7 +962,8 @@
         for(var a in assignments){
             totalAssigned += assignments[a];
         }
-        jobLog.log("assigned %i kittens (should have been %i)", totalAssigned, game.resPool.get("kittens").value);
+        if(totalAssigned != game.resPool.get("kittens").value)
+            jobLog.warn("assigned %i kittens (should have been %i)", totalAssigned, game.resPool.get("kittens").value);
 
         jobLog.log("normalise complete", assignments);
         return assignments;
@@ -1500,11 +1506,10 @@
         return gamePage.bld.buildingsData.filter(function(b){return b.val > 0 && b.togglableOnOff; });
     }
 
-    // Bleurgh Steamworks are hard :-(
     function variableFromToggleableBuilding(bld){
         bldId = buttonId(bld)
         bv = {
-            name: "ToggleBuilding|" + bldId,
+            name: "ToggleBuilding|" + bldId
         };
         bv[bldId] = 1;
         var effects = bld.effectsCalculated || bld.effects;
@@ -1562,6 +1567,8 @@
         bldId = buttonId(bld)
         bv = {
             name: "IncrementBuilding|" + bldId,
+            // Default to on and producing but easily subvertible
+            utility: 0.0001
         };
         bv[bldId] = 1;
         var effects = bld.effectsCalculated || bld.effects;
@@ -1607,7 +1614,7 @@
         if(bldId == "brewery"){
             if(game.calendar.festivalDays > 0){
                 // Valueing happiness at ~0.2 per 10% currently.
-                bv.utility = 0.2 / 100;
+                bv.utility = happinessUtility * 3 / 100;
             } else {
                 bv.utility = -0.01;
             }
@@ -2263,6 +2270,8 @@
         // Utility for unlocking another option to work towards.
         const worshipToUnlockNextOption = nextUnlockBtn ? nextUnlockBtn.model.metadata.faith - worship: -1;
         const howFarDoesPraiseGetUs = Math.min(1, additionalWorship / worshipToUnlockNextOption);
+        //TODO: Does below utility for faith unlock in variableForPraiseSun perform better (it's more consistant at least)
+        //var utility = nextUnlockBtn ? howFarDoesPraiseGetUs * buttonUtility(nextUnlockBtn) * utilityFactorForInfeasible : 0;
         var utility = nextUnlockBtn ? howFarDoesPraiseGetUs : 0;
         faithLog.log("Utility for unlocks: %f (additionalWorship: %f, worshipToUnlockNextOption: %f, howFarDoesPraiseGetUs: %f)", utility, additionalWorship, worshipToUnlockNextOption, howFarDoesPraiseGetUs);
         if(revolutionBtn.model.metadata.val > 0){

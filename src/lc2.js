@@ -49,7 +49,7 @@
     var jiggleUtility = false;
     // Once we switch job assignments this many times (as a percentage of total kittens), 
     // optimise job assignments using "Manage Jobs" button
-    var reassignmentsBeforeOptimise = 0.2;
+    var reassignmentsBeforeOptimise = 0.5;
     // Amount of catnip to reserve in units of "days of consumption". This should be approximately
     // the number of days we can fall into a new season without replanning, plus a little bit for safety?
     // Or even more for safety if you have murdering kittens I suppose.
@@ -67,7 +67,7 @@
     var scienceUtility = 15;
     var workshopUtility = 12;
     var policyUtility = 2;
-    var embassyUtility = 0.4;
+    var embassyUtility = 0.25;
     var bldUtility = 0.95;
 
     // How much additional utility is granted for expanding storage to build things that are currently 
@@ -82,17 +82,37 @@
     // > 1 Multiply resource cap by this and use that as constraint, kind of a half way house.
     var contrainResourceCap = 0;
 
+    // Latest version of the game this script was tested / developed against.
+    // See game.telemetry, checked at startup. 
+    var testedVersion = {version: 1492, revision: 1218}
+
     var eventLoops = {
         execHandle: undefined,
         gatherHandle: undefined
     };
 
     //#region Control Of event loops
-    function go() {
+    function go(checkVersion = true) {
         // Important to not stall when choosing a policy upgrade.
         game.opts.noConfirm = true;
+        if(checkVersion && !checkVersionIsTested()){
+            return;
+        }
         ensureTabsRendered();
         restartExecLoop();
+    }
+
+    function checkVersionIsTested() {
+        if(game.telemetry.version != testedVersion.version || game.telemetry.buildRevision != testedVersion.revision )
+        {
+            logger.warn("Game version %s.r%s does not match tested version %s.r%s. Here be dragons. Make a backup and call go(false) to proceed.",
+            game.telemetry.version,
+            game.telemetry.buildRevision,
+            testedVersion.version,
+            testedVersion.revision);
+            return false;
+        }
+        return true;
     }
 
     function stopLoop(handleName){
@@ -149,7 +169,6 @@
 
     function executePlanNow(timesBought = 0){
         execLog.log("Executing");
-        praiseUnderPlan();
         executeResetLogic();
         if(!plan){
             planNow();
@@ -169,19 +188,28 @@
             planNow();
         }
         //console.time("executePlan");
-        executeFestival();
-        promoteUnderPlan();
+        // Note that actions that produce resources (hunt, trade, sell) should re-execute crafting
+        executeCrafts();
+
         observeTheSky();
         controlGatherLoop();
         executeHunts();
+        
         executeExplore();
         executeTrades();
-        executeCrafts();
-        assignJobs();
+
+        executeSellItems();
         executeIncrementableBuilding();
         executeToggleBuildings();
+
+        praiseUnderPlan();
         sacrificeUnderPlan();
+
+        assignJobs();
+        executeFestival();
+        promoteUnderPlan();
         doLeaderChangeTrait("manager");
+
         var bought = false;
         if(timesBought < 5){
             bought = buyUnderPlan();
@@ -323,6 +351,11 @@
             var buyVariable = variableFromButton(btn, outOfReach);
             model.variables[buyVariable.name] = buyVariable;
         }
+        // for(var sellBtn of getSellable()){
+        //     var sellVariable = variableFromSellable(sellBtn, outOfReach);
+        //     model.variables[sellVariable.name] = sellVariable;
+        //     model.constraints[buttonId(sellBtn) + "Sell"] = { max: 1 };
+        // }
         for(var job of getJobAssignments()){
             var jobVariable = variableFromJobAssignment(job);
             model.variables[jobVariable.name] = jobVariable;
@@ -491,6 +524,8 @@
         advancedAutomation: 0.1,
         pneumaticPress: 0.1,
         barges: 0.2,
+        // Factories are heckin expensive.
+        carbonSequestration: 1,
         // I hate zebras for good reason
         oxidation: 15,
 
@@ -507,6 +542,8 @@
         // Science
         // In game description is accurate.
         socialism: 0.0001,
+        // Bloody thespians
+        drama: 1,
         // Script spends a lot of time with capped pop buildings, republic is *probably* better.
         // authocracy: 0.9,
 
@@ -521,6 +558,9 @@
         field: 0.6,
         pasture: 0.5,
         aqueduct: 0.6,
+
+        // Only way to improve starchart production early game.
+        observatory: 1.15,
 
         // General advice is to build these often, crafting is v. important
         workshop: 3,
@@ -1155,30 +1195,28 @@
     function executeTrades(){
         // TODO: shuffle trades so we don't always prioritise Griffins.
         for(tradeable in plan) {
-            if(!tradeable.startsWith("Trade")){
+            if(!tradeable.startsWith("Trade"))
                 continue;
-            }
             desiredTrades = (plan[tradeable] || 0);
             executedTrades = (executedPlan[tradeable] || 0);
             desiredRemainingTrades = desiredTrades - executedTrades;
             if(desiredRemainingTrades < 1)
-                return;
+                continue;
             raceName = tradeable.slice(6);
             tradeBtn = gamePage.diplomacyTab.racePanels.find(rp => rp.race.name == raceName).tradeBtn
             tradesPossibleNow = Math.floor(canAffordHowManyNow(tradeBtn));
             if(tradesPossibleNow < 1)
-                return;
-            if(tradesPossibleNow < 1)
-                return;
+                continue;
             tradesToPerform = Math.min(desiredRemainingTrades, tradesPossibleNow)
             if(tradesToPerform <= 0)
-                return;
+                continue;
             var prevLeader = doLeaderChangeTrait("merchant");
             for(tn = 0; tn < tradesToPerform; tn++){
                 // Good to free up capacity (looking at you sharks)
                 executeCrafts();
                 tradeBtn.buttonContent.click()
             }
+            executeCrafts();
             executedPlan[tradeable] = executedTrades + tradesToPerform
             changeLeader(prevLeader);
         }
@@ -1397,12 +1435,12 @@
         if(desiredExplore < 1)
             return;
 
-        btn = gamePage.diplomacyTab.exploreBtn
+        var btn = gamePage.diplomacyTab.exploreBtn
         if(canAffordNow(gamePage.diplomacyTab.exploreBtn)){
-            console.info("Exploring for new races!");
+            game.msg('9Souls: To seek out new life and new civilizations...');
             btn.buttonContent.click();        
             executedPlan.Explore = 1;        
-            console.log("Replanning (explored)");
+            jobLog.log("Replanning (explored)");
             planNow();
         }
     }
@@ -1495,6 +1533,7 @@
                 gamePage.villageTab.huntBtn.buttonContent.click()
             }
         }
+        executeCrafts();
         executedPlan["Hunt"] = executedHunts + huntsToPerform;
     }
 
@@ -1889,20 +1928,23 @@
             // TODO: This line doesn't actually init the logger. woodman.load('console') needs to be called manually :-(
             woodman.load('console');
             window.logger = woodman.getLogger('main');
+            logger.level = "info";
             window.leaderLog = woodman.getLogger("main.Leader");
+            leaderLog.level = "info";
             window.faithLog = woodman.getLogger("main.faith");
+            faithLog.level = "info";
             window.execLog = woodman.getLogger("main.Execution");
+            execLog.level = "info";
             window.buyableLog = woodman.getLogger("main.buyable");
-            window.jobLog = woodman.getLogger("main.Jobs");
-            window.craftLog = woodman.getLogger("main.Craft");
-            window.simLog = woodman.getLogger("main.Simulate");
-
             buyableLog.level = "info";
+            window.jobLog = woodman.getLogger("main.Jobs");
             jobLog.level = "info";
+            window.craftLog = woodman.getLogger("main.Craft");
             craftLog.level = "info";
-            simLog.level = "info"
+            window.simLog = woodman.getLogger("main.Simulate");
+            simLog.level = "info";
 
-            logger.log("woodman downloaded and executed");
+            logger.log("woodman downloaded, executed and initialized");
             }
         };
         xhttp.open("GET", "https://raw.githubusercontent.com/joshfire/woodman/master/dist/woodman.js", true);
@@ -2398,6 +2440,31 @@
         }
     }
 
+    function sciencePrice(a){
+        return a.prices.find(p => p.name == "science").val || 0;
+    }
+
+    function mostAdvancedResearch(collection){
+        var researched = collection.filter(u => u.researched);
+        if(!researched.length)
+            return "";
+        return researched.sort((a, b) => sciencePrice(b) - sciencePrice(a))[0].label;
+    }
+
+
+    function recordHistory(){
+        var historyString = `${game.stats.getStatCurrent("timePlayed").val.padEnd(18)}${game.stats.getStat("totalResets").val + 1}.${game.calendar.year}`;
+        historyString = historyString.padEnd(28);
+        historyString += `${game.resPool.get("kittens").maxValue} kittens ${mostAdvancedResearch(game.science.techs)}, ${mostAdvancedResearch(game.workshop.upgrades)}`
+//         historyString += `
+
+// `;
+//         var data = game.save();
+// 		data = JSON.stringify(data);
+//         var encodedData = game.compressLZData(data);
+//         historyString += encodedData;
+        logger.info(historyString);
+    }
 
     function plannedUtilities(onlyBuildables = true, topN = 5, orderBy = "quantityChange"){
         var pu = [];
@@ -2563,10 +2630,11 @@
         if(timeLeftSecs <= 0)
         {
             execLog.warn("Goodbye cruel world!");
+            // TODO: Neutered this logic as it went wrong in last reset. Monitor and check.
             // Should always be true I think, but who knows - this code is hard to test ;-)
-            if(game.religionTab.adoreBtn.model.visible)
-                game.religionTab.adoreBtn.buttonContent.click();
-            game.reset();
+            // if(game.religionTab.adoreBtn.model.visible)
+            //     game.religionTab.adoreBtn.buttonContent.click();
+            // game.reset();
             return;
         }
 
@@ -2583,6 +2651,57 @@
 
     function addMinutes(date, minutes) {
         return new Date(date.getTime() + minutes*60000);
+    }
+
+    //#endregion
+
+    //#region Sell
+
+    function getSellable(){
+        return gamePage.bldTab.children.slice(2).filter(b => 
+            b.model.showSellLink && 
+            b.model.metadata.val > 0 &&
+            b.sellHref
+            );
+    }
+
+    function variableFromSellable(button, outOfReach){
+
+        var id = buttonId(button);
+        buyableLog.log("%s: Constructing sell variable", id);
+        const utility = -buttonUtility(button, outOfReach)
+        buyableLog.log("%s: Utility %f", id, utility.toFixed(2));
+        const sellVariable = {
+            name: "Sell|" + id,
+            utility: utility
+        }
+        sellVariable[id + "Sell"] = 1;
+        for(pe of button.model.metadata.prices){
+            const lastCost = pe.val *  Math.pow(button.model.metadata.priceRatio, button.model.metadata.val - 1);
+            const refundedAmount = button.model.refundPercentage * lastCost;
+            buyableLog.log("%s: Resource %s lastCost %f refund amt %f", id, pe.name, lastCost.toFixed(2), refundedAmount.toFixed(2));
+            sellVariable[pe.name] = -refundedAmount;
+        }
+        buyableLog.log(sellVariable)
+        return sellVariable;
+    }
+
+    function executeSellItems(){
+        var sales = segmentPlan().Sell;
+        if(!sales)
+            return;
+        for(var sellItemId in sales){
+            if(sales[sellItemId] < buyThreshold)
+                continue;
+            // Ok I suppose we're really doing this!
+            var sellBtn = getSellable().find(s => buttonId(s) == sellItemId);
+            if(!sellBtn || !sellBtn.sellHref || !sellBtn.sellHref.link)
+            game.msg('9Souls: Selling ' + buttonLabel(sellBtn) + "!");
+            executeCrafts();
+            sellBtn.sellHref.link.click();
+            executedPlan["Sell|" + sellItemId] = 1;
+            planNow();
+        }
     }
 
     //#endregion

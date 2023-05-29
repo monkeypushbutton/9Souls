@@ -82,6 +82,10 @@
     // > 1 Multiply resource cap by this and use that as constraint, kind of a half way house.
     var contrainResourceCap = 0;
 
+    // After first reset, which happens after concrete huts, amount of paragon game will attempt 
+    // to accrue (as a multiple of current paragon). 1 = Reset to double paragon.
+    var paragonPerResetRatio = 0.9;
+
     // Latest version of the game this script was tested / developed against.
     // See game.telemetry, checked at startup. 
     var testedVersion = {version: 1492, revision: 1218}
@@ -2611,9 +2615,9 @@
                 planningForResetSince = new Date();
             }
         } else {
-            // Lets try to double paragon.
+            // Lets try to increase paragon by specifed ratio.
             var resetParagon = game.getResetPrestige().paragonPoints;
-            if(resetParagon * 2 >= totalParagon && game.religion.getRU("apocripha").on){
+            if(resetParagon >= (paragon * paragonPerResetRatio) && game.religion.getRU("apocripha").on){
                 planningForResetSince = new Date();
             }
         }

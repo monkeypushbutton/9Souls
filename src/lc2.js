@@ -36,7 +36,7 @@
     // How much history should we keep?
     var planHistory = 5;
     var purchaseHistory = 50;
-    var tradeHistory = 50;
+    var tradeHistory = 200;
 
     // How much utility is 10% of happiness worth?
     // Setting this too high will end up in a loop of hunting / festival as soon as unlocked.
@@ -98,6 +98,7 @@
     //#region Control Of event loops
     function go(checkVersion = true) {
         // Important to not stall when choosing a policy upgrade.
+        game.msg('9Souls: Starting');
         game.opts.noConfirm = true;
         if(checkVersion && !checkVersionIsTested()){
             return;
@@ -127,6 +128,7 @@
     }
 
     function stop(){
+        game.msg('9Souls: Stopping');
         for(var handle in eventLoops){
             if(eventLoops[handle]){
                 console.log("Stopping " + handle);
@@ -242,6 +244,7 @@
     var historicPlans = new CircularBuffer(planHistory);
     var historicModels = new CircularBuffer(planHistory);
     var historicExecution = new CircularBuffer(purchaseHistory);
+    var historicTrades = new CircularBuffer(tradeHistory);
 
     // We use these variables to track if we need to replan. Do not change.
     var plannedSeason = -1;
@@ -257,6 +260,10 @@
         historicModels.push(plan);
         const timeEnterSolve = performance.now();
         plan = solver.Solve(model);
+        if(!plan.feasible || !plan.bounded){
+            logger.error("Generated model produced an infeasible or unbounded plan. Quitting so you can debug it.");
+            stop();
+        }
         const timeExitSolve = performance.now();
         logger.log("%s took %ims", "solver.Solve", timeExitSolve - timeEnterSolve);
         historicPlans.push(plan);
@@ -524,9 +531,15 @@
     // Some buildings are just really good and some are real stinkers in the context of this script.
     var baseUtilityMap = {
         // Workshop
+        // What's an engineer???
+        factoryOptimization: 0.1,
+        factoryRobotics: 0.1,
+        // We don't use automation. Script too good at crafting.
         factoryAutomation: 0.1,
         advancedAutomation: 0.1,
         pneumaticPress: 0.1,
+        // Meh - not like we miss them anyway.
+        seti: 0.2,
         barges: 0.2,
         // Factories are heckin expensive.
         carbonSequestration: 1,
@@ -548,11 +561,13 @@
         socialism: 0.0001,
         // Bloody thespians
         drama: 1,
+        // Bloody hippies
+        ecology: 4,
         // Script spends a lot of time with capped pop buildings, republic is *probably* better.
         // authocracy: 0.9,
 
         // Faith
-        templars: 1,
+        templars: 2,
         apocripha: 12,
         solarRevolution: 12,
         ivoryTower: 6,
@@ -1201,30 +1216,66 @@
         for(tradeable in plan) {
             if(!tradeable.startsWith("Trade"))
                 continue;
-            desiredTrades = (plan[tradeable] || 0);
-            executedTrades = (executedPlan[tradeable] || 0);
-            desiredRemainingTrades = desiredTrades - executedTrades;
-            if(desiredRemainingTrades < 1)
+            const desiredTrades = (plan[tradeable] || 0);
+            const executedTrades = (executedPlan[tradeable] || 0);
+            const desiredRemainingTrades = desiredTrades - executedTrades;
+            const raceName = tradeable.slice(6);
+            if(desiredRemainingTrades < 1){
+                tradeLog.log("No more trades desired with %s (planned %f executed %i)", raceName, desiredTrades.toFixed(1), executedTrades);
                 continue;
-            raceName = tradeable.slice(6);
-            tradeBtn = gamePage.diplomacyTab.racePanels.find(rp => rp.race.name == raceName).tradeBtn
-            tradesPossibleNow = Math.floor(canAffordHowManyNow(tradeBtn));
-            if(tradesPossibleNow < 1)
+            }
+            //const race = game.diplomacy.get(raceName);
+            var tradeBtn = gamePage.diplomacyTab.racePanels.find(rp => rp.race.name == raceName).tradeBtn
+            //tradeLog.log(tradeBtn);
+            var tradesPossibleNow = Math.floor(canAffordHowManyNow(tradeBtn));
+            if(tradesPossibleNow < 1){
+                tradeLog.log("No trades possible with %s right now", raceName);
                 continue;
-            tradesToPerform = Math.min(desiredRemainingTrades, tradesPossibleNow)
-            if(tradesToPerform <= 0)
+            }
+            var tradesToPerform = Math.min(desiredRemainingTrades, tradesPossibleNow)
+            if(tradesToPerform <= 0){ 
+                tradeLog.log("I don't even know how I'd end up in this branch!?");  
                 continue;
-            var prevLeader = doLeaderChangeTrait("merchant");
+            }
+            if(!civilServiceNotResearched()){
+                var prevLeader = doLeaderChangeTrait("merchant");
+                tradeLog.log("Changed leader to trade previous ", prevLeader, " now ", game.village.leader);  
+            }
             for(tn = 0; tn < tradesToPerform; tn++){
                 // Good to free up capacity (looking at you sharks)
+                tradeLog.log("Executing crafts");
                 executeCrafts();
-                tradeBtn.buttonContent.click()
+                //var preTradeRes = copyCurrentResources();
+                //game.diplomacy.trade(race);
+                tradeLog.log("Executing trade with %s", raceName);
+                tradeBtn.buttonContent.click();
+                //var postTradeRes = copyCurrentResources();
+                //var diff = diffResources(preTradeRes, postTradeRes);
+                // tradeLog.log(diff);
+                // var tradeResult = {
+                //     race: raceName,
+                //     time: new Date(),
+                //     resourceChange: diff
+                // };
+                // tradeLog.log(tradeResult);
+                // historicTrades.push(tradeResult);
             }
             executeCrafts();
             executedPlan[tradeable] = executedTrades + tradesToPerform
-            changeLeader(prevLeader);
+            if(!civilServiceNotResearched()){
+                tradeLog.log("Resetting leader to ", prevLeader);  
+                changeLeader(prevLeader);                
+            }
         }
     }
+
+    // function validateTradeModel(race){
+    //     var expected = variableFromTrade(race, getBuyables(false));
+    //     var actual = {};
+    //     for(var t of tradeHistory.toArray()){
+    //         for(var res in t.)
+    //     }
+    // }
 
     //#endregion
 
@@ -1741,6 +1792,24 @@
     //#endregion
 
     //#region Simulate Production
+    function copyCurrentResources(){
+        return game.resPool.resources.map(r => {return {resource: r.name, value: r.value}});
+    }
+
+    function diffResources(before, after){
+        var diffObj = {};
+        if(before.length != after.length){
+            logger.error("Resource arrays not of equal length. Unable to diff.");
+            return {}; 
+        }
+        for(var resIdx = 0; resIdx < before.length; resIdx++){
+            var diff = after[resIdx].value - before[resIdx].value;
+            if(diff)
+                diffObj[before[resIdx].resource] = diff;
+        }
+        return diffObj;
+    }
+
     function resoucePerTick(res, mode = 0, modeVariable = null) {
         simLog.log("resoucePerTick(%s, %i, %s)", res.name, mode, buttonId(modeVariable))
         var productionStack = game.getResourcePerTickStack(res.name, false, game.calendar.season);
@@ -1947,6 +2016,8 @@
             craftLog.level = "info";
             window.simLog = woodman.getLogger("main.Simulate");
             simLog.level = "info";
+            window.tradeLog = woodman.getLogger("main.Trade");
+            tradeLog.level = "info";
 
             logger.log("woodman downloaded, executed and initialized");
             }

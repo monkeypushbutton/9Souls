@@ -5,32 +5,49 @@
 // @description  An AI for bloodrizer's Kittens Game, capable of performing most actions.
 // @author       monkeypushbutton@gmail.com
 // @match        https://kittensgame.com/web/*
+// @match        https://kittensgame.com/*
+// @match        http://kittensgame.com/beta/
 // @grant        unsafeWindow
 // @grant        GM_getValue
-// @GRANT        GM_setValue
+// @grant        GM_setValue
 // @grant        GM_addElement
+// @sandbox      JavaScript
 // @require      https://unpkg.com/javascript-lp-solver@0.4.24/prod/solver.js
 // @require      https://raw.githubusercontent.com/joshfire/woodman/master/dist/woodman.js
 // ==/UserScript==
 
+/*jslint es6 */
+/*jslint eval */
+/*jslint for:true */
+/*jslint todo:true*/
+/*global window*/
+
 // TODO: Kittens massacre in year 1 due to building too many huts. Sad but not a deal breaker.
 // TODO: UI often doesn't refresh after script takes an action. Smelters going on and off are a case in point.
 // TODO: Pollution. Incentivise not increasing levels.
-// TODO: Space haven't got there in playthroughs yet
-// TODO: Upgradable builings (solar farm etc)
-// TODO: Lazy crafting. Only perform desired crafts when resources near limit, or in process of actually using them
+// TODO: Lazy crafting / trading. Only perform desired crafts when resources near limit, or in process of actually using them
 // Rationale: We might happen to improve craft efficiency first and hence will end up being more efficient overall.
 // especially noticable with Tears via Ziggurats, but generally seems a sound idea.
 
 // TODO: Check if below TODO is still valid after resCap constraints?
 // TODO: LP Still wants to assign kittens to e.g. scientist when resource is at max at certain points. I'm manually correcting for it right now, which sucks.
+// TODO: Script is murdering kittens with gay abandon in cold winters. Once that is fixed, reservedNipDays can be reduced.
+// TODO: Emergency farming if catnip < reservedAmount & gain per sec < 0
+// TODO: shuffle trades / crafts so we don't always prioritise one thing.
+// TODO: evaluateProductionStack can't handle ratioIndent, mulltiplier and maybe perYear
+// TODO: Adore and transcend.
+// TODO: Check math in variableForPraise Faith is not 1-1 with worship after apocrypha / transcend etc.
+// TODO: Check alternative utility for faith unlock in variableForPraiseSun may perform better (it's more consistant at least)
+// TODO: Selling things might me beneficial occasionally. e.g. swapping Unicorn Pastures for Ziggurat structures
+// Some code for selling exists, but it's a bit buggy.
 
-// NB: Season is ~ 200 seconds long. 
+"use strict";
 
-//(function() {
-    // How long between executions of plan. 
+window.nineSouls = function() {
+    // How long between executions of plan.
     // Setting this too low will be spammy and may slow game.
     // Setting too high may cause missed observations, more 0 / max resource inefficiencies etc.
+    // NB: Season is ~ 200 seconds long.
     var executeIntervalSeconds = 5;
 
     // How much history should we keep?
@@ -47,13 +64,12 @@
     var diminishingReturns = false;
     // Randomly perturb utility values. I don't know why I added this.
     var jiggleUtility = false;
-    // Once we switch job assignments this many times (as a percentage of total kittens), 
+    // Once we switch job assignments this many times (as a percentage of total kittens),
     // optimise job assignments using "Manage Jobs" button
     var reassignmentsBeforeOptimise = 0.5;
     // Amount of catnip to reserve in units of "days of consumption". This should be approximately
     // the number of days we can fall into a new season without replanning, plus a little bit for safety?
     // Or even more for safety if you have murdering kittens I suppose.
-    // TODO: Script is murdering kittens with gay abandon in cold winters. Once that is fixed, this can be reduced.
     var reservedNipDays = 100;
 
     // Somtimes plan will want two things using similar resources.
@@ -69,10 +85,15 @@
     var policyUtility = 2;
     var embassyUtility = 0.25;
     var bldUtility = 0.95;
+    var spaceGcUtility = 10;
 
-    // How much additional utility is granted for expanding storage to build things that are currently 
+    // How much additional utility is granted for expanding storage to build things that are currently
     // out of reach (as a multiplier of the basic utility of the infeasible thing)
     var utilityFactorForInfeasible = 0.075;
+
+    // Utility gain per percentage point in "craft effectiveness"
+    // Feeds into bonus for workshop/factory and keeping factories powered.
+    var utilityForCraftEffectiveness = 0.25;
 
     // Toggle logic to try and stop script from assiging kittens to dead jobs.
     // May cause longer term deadlocks when science gets evently split between jobs making little progress?
@@ -82,24 +103,41 @@
     // > 1 Multiply resource cap by this and use that as constraint, kind of a half way house.
     var contrainResourceCap = 0;
 
-    // After first reset, which happens after concrete huts, amount of paragon game will attempt 
+    // After first reset, which happens after concrete huts, amount of paragon game will attempt
     // to accrue (as a multiple of current paragon). 1 = Reset to double paragon.
     var paragonPerResetRatio = 0.9;
 
     // Latest version of the game this script was tested / developed against.
-    // See game.telemetry, checked at startup. 
-    var testedVersion = {version: 1492, revision: 1218}
+    // See game.telemetry, checked at startup.
+    var supportedVersions = ['1492'];
 
+    var isRunning = false;
+
+    //#region Get references to kittensgame's guts
+
+    var kg = window.game || unsafeWindow.game;
+
+    function ensureKgReference(){
+        kg = window.game || unsafeWindow.game;
+    }
+
+    //#endregion
+
+    //#region Control Of event loops
+
+    // Do not touch. Used for starting and stopping various recurring activities.
     var eventLoops = {
         execHandle: undefined,
         gatherHandle: undefined
     };
 
-    //#region Control Of event loops
     function go(checkVersion = true) {
+        ensureKgReference();
+        setupLoggers();
         // Important to not stall when choosing a policy upgrade.
-        game.msg('9Souls: Starting');
-        game.opts.noConfirm = true;
+        kg.msg('9Souls: Starting');
+        isRunning = true;
+        kg.opts.noConfirm = true;
         if(checkVersion && !checkVersionIsTested()){
             return;
         }
@@ -108,13 +146,11 @@
     }
 
     function checkVersionIsTested() {
-        if(game.telemetry.version != testedVersion.version || game.telemetry.buildRevision != testedVersion.revision )
+        if(supportedVersions.indexOf(game.telemetry.version) == -1)
         {
-            logger.warn("Game version %s.r%s does not match tested version %s.r%s. Here be dragons. Make a backup and call go(false) to proceed.",
-            game.telemetry.version,
-            game.telemetry.buildRevision,
-            testedVersion.version,
-            testedVersion.revision);
+            logger.warn("Game version %s does not match tested version %s. Here be dragons. Make a backup and call go(false), or update user script to proceed.",
+            kg.telemetry.version,
+            testedVersion.version);
             return false;
         }
         return true;
@@ -128,28 +164,30 @@
     }
 
     function stop(){
-        game.msg('9Souls: Stopping');
-        for(var handle in eventLoops){
+        kg.msg("9Souls: Stopping");
+        isRunning = false;
+        Object.keys(eventLoops).forEach(function(handle){
             if(eventLoops[handle]){
                 console.log("Stopping " + handle);
                 stopLoop(handle);
             }
-        }
+        });
     }
 
     function controlGatherLoop(){
-        var nipInfo = game.resPool.resources[0];
+        var nipInfo = kg.resPool.resources[0];
         if(nipInfo.value > 1000 || nipInfo.perTickCached > 2){
             stopLoop('gatherHandle');
         }
-        else 
+        else {
             restartGatherLoop();
+        }
     }
 
     function restartGatherLoop(){
         stopLoop('gatherHandle');
         // ~7 nip per second, about as fast as I can spam click.
-        eventLoops.gatherHandle = setInterval(() => game.bldTab.children[0].buttonContent.click(), 150);
+        eventLoops.gatherHandle = setInterval(() => kg.bldTab.children[0].buttonContent.click(), 150);
     }
 
     function restartExecLoop(){
@@ -159,14 +197,14 @@
     }
 
     function ensureTabsRendered(){
-        gamePage.villageTab.render();
-        gamePage.libraryTab.render();
-        gamePage.workshopTab.render();
-        gamePage.bldTab.render();
-        gamePage.diplomacyTab.render();
-        gamePage.religionTab.render();
-        gamePage.spaceTab.render();
-        gamePage.timeTab.render();
+        kg.villageTab.render();
+        kg.libraryTab.render();
+        kg.workshopTab.render();
+        kg.bldTab.render();
+        kg.diplomacyTab.render();
+        kg.religionTab.render();
+        kg.spaceTab.render();
+        kg.timeTab.render();
     }
 
     //#endregion
@@ -179,7 +217,7 @@
         if(!plan){
             planNow();
         }
-        if(gamePage.calendar.season != plannedSeason){
+        if(kg.calendar.season != plannedSeason){
             execLog.log("Replanning (season)");
             planNow();
         }
@@ -188,7 +226,7 @@
             execLog.log("Replanning (possibilities changed)");
             planNow();
         }
-        if(game.resPool.get("kittens").value != plannedKittens){        
+        if(kg.resPool.get("kittens").value != plannedKittens){
             //Mainly so we don't have to wait a whole season to build a field :-)
             execLog.log("Replanning (kittens changed)");
             planNow();
@@ -200,7 +238,7 @@
         observeTheSky();
         controlGatherLoop();
         executeHunts();
-        
+
         executeExplore();
         executeTrades();
 
@@ -214,6 +252,7 @@
         assignJobs();
         executeFestival();
         promoteUnderPlan();
+        considerUpgrade();
         doLeaderChangeTrait("manager");
 
         var bought = false;
@@ -226,12 +265,13 @@
             planNow();
             executePlanNow(timesBought + 1);
         }
+        updatePlanUi();
     }
 
-    function observeTheSky(){    
-        if(gamePage.calendar.observeBtn){
-            execLog.log("Observing...")
-            gamePage.calendar.observeBtn.click();
+    function observeTheSky(){
+        if(kg.calendar.observeBtn){
+            execLog.log("Observing...");
+            kg.calendar.observeBtn.click();
         }
     }
 
@@ -253,13 +293,13 @@
     var reservedFarmers = 0;
 
     function planNow(){
-        plannedSeason = gamePage.calendar.season;
+        plannedSeason = kg.calendar.season;
         plannedButtons = getBuyables();
-        plannedKittens = game.resPool.get("kittens").value;
+        plannedKittens = kg.resPool.get("kittens").value;
         model = buildModel();
         historicModels.push(plan);
         const timeEnterSolve = performance.now();
-        plan = solver.Solve(model);
+        plan = window.solver.Solve(model);
         if(!plan.feasible || !plan.bounded){
             logger.error("Generated model produced an infeasible or unbounded plan. Quitting so you can debug it.");
             stop();
@@ -274,10 +314,11 @@
         executedPlan = {validFrom: new Date()};
         logger.info(model);
         logger.info(plan);
+        updatePlanUi();
     }
 
     function planHorizonSeconds(){
-        return (100 - gamePage.calendar.day) * 2;
+        return (100 - kg.calendar.day) * 2;
     }
 
     function secretUnlocks() {
@@ -290,16 +331,17 @@
 
     function limitedResources(btn){
         //console.log(buttonId(btn), btn)
-        var limitedResources = []
-        for(cost of btn.model.prices){
-            var resMax = game.resPool.get(cost.name).maxValue
+        var limitedResourcesArr = [];
+        btn.model.prices.forEach(function(cost){
+            var resMax = kg.resPool.get(cost.name).maxValue;
             if(cost.name == "catnip"){
                 resMax -= reservedNipAmount();
             }
-            if(resMax && resMax < cost.val)
-                limitedResources.push(cost)
-        }
-        return limitedResources;
+            if(resMax && resMax < cost.val){
+                limitedResourcesArr.push(cost);
+            }
+        });
+        return limitedResourcesArr;
     }
 
     function isFeasible(btn){
@@ -315,50 +357,48 @@
     }
 
     function isFaithButton(btn){
-        if(btn.model && btn.model.metadata)
-            return game.religion.religionUpgrades.find(ru => ru.name == btn.model.metadata.name);
+        if(btn.model && btn.model.metadata){
+            return kg.religion.religionUpgrades.find((ru) => ru.name == btn.model.metadata.name);
+        }
         return false;
     }
 
     function isBuilding(btnId){
-        return game.bld.buildingsData.find(b => buttonId(b) == btnId)
+        return kg.bld.buildingsData.find((b) => buttonId(b) == btnId);
     }
 
     function isWorkshopButton(btn){
         return btn.tab && btn.tab.tabId == "Workshop";
     }
 
+    function isGcButton(btn){
+        return kg.space.programs.find((p) => p.name == buttonId(btn)) != null;
+    }
+
     function canAffordHowManyNow(btn){
-        var limitedAmount = Infinity
         //console.debug("Checking if I can afford ", buttonId(btn))
-        for(pe of btn.model.prices){
+        return btn.model.prices.reduce(function(limitedAmount, pe){
             const reservedRes = pe.name == "catnip" ? reservedNipAmount() : 0;
             const needed = pe.val * leaderDiscountRatio(btn, pe.name);
-            const resPoolRes = gamePage.resPool.resourceMap[pe.name].value;
-            const availableResources = Math.max(resPoolRes - reservedRes, 0)
-            const ratio = availableResources / needed
-            if(ratio < 1) {
-                //console.debug("I don't have enough ", pe.name, " need ", pe.val, " have ", availableResources, reservedRes == 0 ? "" : " (not including " + reservedRes + " reserved) ")
-                return ratio;
-            }
+            const resPoolRes = kg.resPool.resourceMap[pe.name].value;
+            const availableResources = Math.max(resPoolRes - reservedRes, 0);
+            const ratio = availableResources / needed;
             //console.debug("I have enough ", pe.name, " need ", pe.val, " have ", resPoolRes)
-            if(ratio < limitedAmount)
-                limitedAmount = ratio
-        }
-        return limitedAmount;
+            return Math.min(ratio, limitedAmount);
+        }, Infinity);
     }
 
     function buildModel() {
         const timeEnter = performance.now();
-        // TODO: Build a model with steamworks on or off. Plan twice and execute plan with best utility.
         model = {
             optimize: "utility",
             opType: "max",
             variables: {},
-            constraints: {}
+            constraints: {},
+            planFor: planHorizonSeconds()
         };
         var outOfReach = getBuyables(false);
-        for(var btn of getBuyables()){
+        for(const btn of getBuyables()){
             var buyVariable = variableFromButton(btn, outOfReach);
             model.variables[buyVariable.name] = buyVariable;
         }
@@ -367,7 +407,7 @@
         //     model.variables[sellVariable.name] = sellVariable;
         //     model.constraints[buttonId(sellBtn) + "Sell"] = { max: 1 };
         // }
-        for(var job of getJobAssignments()){
+        for(const job of getJobAssignments()){
             var jobVariable = variableFromJobAssignment(job);
             model.variables[jobVariable.name] = jobVariable;
         }
@@ -386,12 +426,12 @@
             model.constraints[bldName] = { max: incrementableBld.val };
         }
         for(var toggleBld of getToggleableBuildings()){
-            var bldName = buttonId(toggleBld);
-            var bldNumVar = variableFromToggleableBuilding(toggleBld);
-            model.variables[bldNumVar.name] = bldNumVar;
-            model.constraints[bldName] = { max: 1 };
+            var tglBldName = buttonId(toggleBld);
+            var tglBldNumVar = variableFromToggleableBuilding(toggleBld);
+            model.variables[tglBldNumVar.name] = tglBldNumVar;
+            model.constraints[tglBldName] = { max: 1 };
         }
-        for(var res of game.resPool.resources) {
+        for(var res of kg.resPool.resources) {
             if(res.name == "catnip"){
                 var emergencyNip = reservedNipAmount();
                 model.constraints[res.name] = {
@@ -409,8 +449,10 @@
             }
         }
         var promoteVariable = variableForPromoteLeader();
-        if(promoteVariable)
+        if(promoteVariable){
             model.variables[promoteVariable.name] = promoteVariable;
+            model.constraints.promotion = {max: 1};
+        }
         for(var huntVariable of variableFromHunt()) {
             model.variables[huntVariable.name] = huntVariable;
             if(huntVariable.huntForLuxury){
@@ -434,8 +476,8 @@
         if(festVariable){
             model.variables[festVariable.name] = festVariable;
         }
-        if(game.science.get("electricity").researched){
-            model.constraints.energy = {max: 0}
+        if(kg.science.get("electricity").researched){
+            model.constraints.energy = {max: 0 - nondispatchableEnergyConsumption()}
         }
         reservedFarmers = reserveFarmers();
         model.constraints.kittens.max -= reservedFarmers;
@@ -444,19 +486,25 @@
         return model;
     }
 
-    function segmentPlan(){
+    function nondispatchableEnergyConsumption(){
+        return kg.bld.meta[0].meta.filter(m => !m.togglable).reduce((total, b) => total + b.totalEffectsCached.energyConsumption, 0)
+    }
+
+    function segmentPlan(p = plan){
         var sp = {};
         var notCopied = ["bounded", "feasible", "isIntegral", "result"];
-        for(f in plan){
-            if(notCopied.find(nc => nc == f))
+        for(var f in p){
+            if(notCopied.find(nc => nc == f)){
                 continue;
+            }
             var parts = f.split("|");
-            if(parts.length == 1)
-                sp[f] = plan[f];
-            else {
-                if(!sp[parts[0]])
+            if(parts.length == 1){
+                sp[f] = p[f];
+            } else {
+                if(!sp[parts[0]]){
                     sp[parts[0]] = {};
-                sp[parts[0]][parts[1]] = plan[f];
+                }
+                sp[parts[0]][parts[1]] = p[f];
             }
         }
         return sp;
@@ -465,48 +513,114 @@
     //#endregion Plan
 
     //#region Buyables
+
+    function upgradeButton(btn){
+        kg.msg('9Souls: Upgrading ' + buttonLabel(btn));
+        if(btn.model.showSellLink){
+            var sellLink = btn.sellHref.link;
+            var number = btn.model.metadata.val;
+            for(var sellIdx = 0; sellIdx < number; sellIdx++){
+                sellLink.click();
+            }
+        }
+        btn.stageLinks[btn.stageLinks.length - 1].link.click();
+        planNow();
+    }
+
+    function doubleCheckUpgradeAvailable(btn){
+        return btn.model.metadata.stage == 0 && btn.model.metadata.stages[1].stageUnlocked;
+    }
+
+    function considerUpgrade(){
+        if(kg.science.get("electronics").researched){
+            // Broadcast Tower is vg - just upgrade.
+            var ampiBtn = kg.bldTab.children.find(b => buttonId(b) == "amphitheatre");
+            if(doubleCheckUpgradeAvailable(ampiBtn)){
+                // Ok to upgrade.
+                upgradeButton(ampiBtn);
+            }
+            var libraryButton = kg.bldTab.children.find(b => buttonId(b) == "library");
+            // I think this upgrade should happen with uplink so that we get immediate boost to max science etc effectiveness.
+            if(kg.workshop.get("uplink").researched){
+                if(doubleCheckUpgradeAvailable(libraryButton)){
+                    // Ok to upgrade.
+                    upgradeButton(libraryButton);
+                }
+            }
+        }
+        if(kg.science.get("ecology").researched){
+            var pastureBtn = kg.bldTab.children.find(b => buttonId(b) == "pasture");
+            // Upgrade when we start hitting an energy crisis.
+            if(kg.resPool.energyProd - kg.resPool.energyCons < 5 ){
+                if(doubleCheckUpgradeAvailable(pastureBtn)){
+                    // Ok to upgrade.
+                    upgradeButton(pastureBtn);
+                }
+            }
+        }
+        if(kg.science.get("robotics").researched){
+            var aqueductBtn = kg.bldTab.children.find(b => buttonId(b) == "aqueduct");
+            // Upgrade when we start hitting an energy crisis again after solar farm is upgraded
+            if(
+                kg.resPool.energyProd - kg.resPool.energyCons < 5 &&
+                kg.bld.get("pasture").stage != 0
+                ){
+                if(doubleCheckUpgradeAvailable(aqueductBtn)){
+                    // Ok to upgrade.
+                    upgradeButton(aqueductBtn);
+                }
+            }
+        }
+    }
+
     function getBuyables(feasible = true) {
         //console.time("getBuyables");
         // console.time("bldTab.render");
-        // gamePage.bldTab.render();    
+        // gamePage.bldTab.render();
         // console.timeEnd("bldTab.render");
-        buyable = gamePage.bldTab.children.slice(2).filter(b => 
+        buyable = kg.bldTab.children.slice(2).filter(b =>
             isFeasible(b) == feasible && (
-                !planningForResetSince || 
-                b.model.metadata.effects.maxKittens || 
-                game.bldTab.bldGroups.find(bg => bg.group.name == "storage").group.buildings.find(build => build == buttonId(b))
+                !planningForResetSince ||
+                b.model.metadata.effects.maxKittens ||
+                kg.bldTab.bldGroups.find(bg => bg.group.name == "storage").group.buildings.find(build => build == buttonId(b))
             )
         );
 
         if(planningForResetSince)
             return buyable;
 
-        if(gamePage.workshopTab.visible){
+        if(kg.workshopTab.visible){
             // gamePage.workshopTab.render();
-            buyable = buyable.concat(gamePage.workshopTab.buttons.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched));
+            buyable = buyable.concat(kg.workshopTab.buttons.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched));
         }
-        if(gamePage.libraryTab.visible){
+        if(kg.libraryTab.visible){
             // console.time("libraryTab.render");
-            // gamePage.libraryTab.render();
+            // kg.libraryTab.render();
             // console.timeEnd("libraryTab.render");
-            buyable = buyable.concat(gamePage.libraryTab.buttons.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched));
-            if(gamePage.libraryTab.policyPanel.visible){
-                buyable = buyable.concat(gamePage.libraryTab.policyPanel.children.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched && !b.model.metadata.blocked))
+            buyable = buyable.concat(kg.libraryTab.buttons.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched));
+            if(kg.libraryTab.policyPanel.visible){
+                buyable = buyable.concat(kg.libraryTab.policyPanel.children.filter(b => b.model.visible && isFeasible(b) == feasible && !b.model.metadata.researched && !b.model.metadata.blocked))
             }
         }
-        if(gamePage.diplomacyTab.visible){
-            // gamePage.diplomacyTab.render();
-            buyable = buyable.concat(gamePage.diplomacyTab.racePanels.map(rp => rp.embassyButton).filter(b => b.model.visible && isFeasible(b) == feasible));
+        if(kg.diplomacyTab.visible){
+            // kg.diplomacyTab.render();
+            buyable = buyable.concat(kg.diplomacyTab.racePanels.map(rp => rp.embassyButton).filter(b => b.model.visible && isFeasible(b) == feasible));
         }
-        if(gamePage.religionTab.visible){
-            // gamePage.religionTab.render();
-            buyable = buyable.concat(gamePage.religionTab.rUpgradeButtons.filter(btn => btn.model.visible && isFeasible(btn) == feasible && !(btn.model.metadata.noStackable && btn.model.metadata.val != 0 )));
-            if(game.bld.get("ziggurat").val > 0){
-                buyable = buyable.concat(gamePage.religionTab.zgUpgradeButtons.filter(zu => zu.model.visible && isFeasible(zu) == feasible))
+        if(kg.religionTab.visible){
+            // kg.religionTab.render();
+            buyable = buyable.concat(kg.religionTab.rUpgradeButtons.filter(btn => btn.model.visible && isFeasible(btn) == feasible && !(btn.model.metadata.noStackable && btn.model.metadata.val != 0 )));
+            if(kg.bld.get("ziggurat").val > 0){
+                buyable = buyable.concat(kg.religionTab.zgUpgradeButtons.filter(zu => zu.model.visible && isFeasible(zu) == feasible))
             }
-
-            //gamePage.religionTab.zgUpgradeButtons
-
+        }
+        if(kg.spaceTab.visible){
+            buyable = buyable.concat(kg.spaceTab.GCPanel.children.filter(btn =>
+                btn.model.visible &&
+                (btn.model.metadata.val == 0 || !btn.model.metadata.noStackable) &&
+                isFeasible(btn) == feasible));
+            for(var panel of kg.spaceTab.planetPanels){
+                buyable = buyable.concat(panel.children.filter(btn => btn.model.visible && isFeasible(btn) == feasible));
+            }
         }
         buyable = buyable.concat(secretUnlocks());
         //console.timeEnd("getBuyables");
@@ -542,7 +656,7 @@
         seti: 0.2,
         barges: 0.2,
         // Factories are heckin expensive.
-        carbonSequestration: 1,
+        carbonSequestration: btn => btn.model.metadata.val == 0 ? 1 : 10,
         // I hate zebras for good reason
         oxidation: 15,
 
@@ -581,8 +695,6 @@
         // Only way to improve starchart production early game.
         observatory: 1.15,
 
-        // General advice is to build these often, crafting is v. important
-        workshop: 3,
         // Pop
         // Highly useful - pretty much always
         hut: 5,
@@ -597,13 +709,34 @@
         mint: 0.3,
         // Production
         magneto: 1.5,
+        reactor: 1.5,
         smelter: 1.5,
-        unicornPasture: 0.5
+        unicornPasture: 0.5,
+
+        mine: (btn) => firstTimesTheCharm(btn, 1),
+        workshop: (btn) => firstTimesTheCharm(btn, utilityForCraftEffectiveness * 6),
+        library: (btn) => firstTimesTheCharm(btn, 1),
+        temple: (btn) => firstTimesTheCharm(btn, 1),
+        // Starcharts are a huuge bottleneck.
+        sattelite: (btn) => firstTimesTheCharm(btn, 3),
+
+        faithTab: [faithUtility, ]
     };
 
     function isPolicy(btn){
         const btnId = (typeof btn == 'object') ? buttonId(btn) : btn;
-        return game.science.policies.find(p => p.name == btnId)
+        return kg.science.policies.find(p => p.name == btnId)
+    }
+
+    // Bonus for buildings where the first is important.
+    function firstTimesTheCharm(btn, base){
+        if(btn.model.metadata.val == 0){
+            buyableLog.log("%s: Incentive applied for first building %f", buttonId(btn), (base * 2.5).toFixed(2));
+        }
+        else {
+            return base;
+        }
+        return btn.model.metadata.val == 0 ? 2.5 : 1;
     }
 
     function buttonUtility(btn, outOfReach = null){
@@ -611,39 +744,58 @@
         // Faith upgrades are pretty important, as are science and workshop.
         // Incentivise them as they tend to look expensive to the optimiser.
         var mappedUtility = baseUtilityMap[id];
-        var utility = mappedUtility || baseUtility;
-        if(isFaithButton(btn))
-            utility = mappedUtility || faithUtility;
+        var utility = baseUtility;
+        if (typeof mappedUtility === 'function') {
+            buyableLog.log("Calling mappedUtility function");
+            switch (mappedUtility.length){
+                case 0:
+                    utility = mappedUtility();
+                    break;
+                case 1:
+                    utility = mappedUtility(btn);
+                    break;
+                case 2:
+                    utility = mappedUtility(btn, outOfReach);
+                    break;
+                default:
+                    buyableLog.warn("Too many arguments for utility function!");
+            }
+        }
+        else if (!(mappedUtility === undefined)) {
+            utility = mappedUtility;
+        }
+
+        else if(isFaithButton(btn))
+            utility = faithUtility;
         else if(isScienceButton(btn))
-            utility = mappedUtility || scienceUtility;
+            utility = scienceUtility;
         else if(isWorkshopButton(btn))
-            utility = mappedUtility || workshopUtility;
+            utility = workshopUtility;
         else if (isPolicy(btn))
-            utility = mappedUtility || policyUtility;
+            utility = policyUtility;
+        else if (isGcButton(btn))
+            utility = spaceGcUtility;
         // Embassies have diminishing returns.
         else if(btn.race){
-            // TODO: Should Embassy returns be based somewhat on unlocks?
-            var baseutility = mappedUtility || embassyUtility;
-            buyableLog.log("%s: Embassy base utility %f", id, baseutility.toFixed(2));
-            const builtAlready = btn.model.metadata.val;        
-            if(btn.race.sells.find(s => s.minLevel && s.minLevel > builtAlready)){            
-                baseutility *= 1.6;
-                buyableLog.log("%s: Bonus applied for unlocking goods %f", id, baseutility.toFixed(2));
+            utility = embassyUtility;
+            buyableLog.log("%s: Embassy base utility %f", id, utility.toFixed(2));
+            const builtAlready = btn.model.metadata.val;
+            if(btn.race.sells.find(s => s.minLevel && s.minLevel > builtAlready)){
+                utility *= 1.6;
+                buyableLog.log("%s: Bonus applied for unlocking goods %f", id, utility.toFixed(2));
             }
             if(diminishingReturns){
-                utility = baseutility - (diminishingReturns ? game.getLimitedDR(builtAlready, baseutility) : 0);
+                utility = utility - (diminishingReturns ? kg.getLimitedDR(builtAlready, utility) : 0);
                 buyableLog.log("%s: Penalty for diminishing returns applied %f", id, utility.toFixed(2));
-            } else {
-                utility = baseutility;
             }
         }
         else if(isBuilding(id)) {
             var baseutility = mappedUtility || bldUtility;
             if(id == "steamworks"){
-                if(game.bld.get("magneto").val > 0){
-                    baseutility = 1.2 
+                if(kg.bld.get("magneto").val > 0){
+                    baseutility = 1.2
                     buyableLog.log("%s: Steamworks specific logic (post magneto) baseutility: %f", id, baseutility.toFixed(2));
-                } else if (game.workshop.get("printingPress").researched) {
+                } else if (kg.workshop.get("printingPress").researched) {
                     baseUtility = 0.8
                     buyableLog.log("%s: Steamworks specific logic (post printingPress) baseutility: %f", id, baseutility.toFixed(2));
                 } else {
@@ -651,15 +803,18 @@
                     buyableLog.log("%s: Steamworks specific logic (naked) baseutility: %f", id, baseutility.toFixed(2));
                 }
             }
-            if((id == "mine" || id == "workshop" || id == "library" || id == "temple") && btn.model.metadata.val == 0){
-                // Incentive for unlock chain Mine => Miner => Workshop & anything to do with minerals i.e. most of the game
-                baseutility *= 2.5;
-                buyableLog.log("%s: Incentive applied for first building %f", id, baseutility.toFixed(2));
-            }
             buyableLog.log("%s: Base utility: %f", id, baseutility.toFixed(2));
+
+            var craftEffect = btn.model.metadata.effects.craftRatio || 0;
+            if(craftEffect){
+                var craftUtility = craftEffect * 100 * utilityForCraftEffectiveness;
+                baseutility += craftUtility;
+                buyableLog.log("%s: Bonus utility for craft ratio %f, utility %f, new utility %f", id, craftEffect.toFixed(2), craftUtility.toFixed(2), baseutility.toFixed(2));
+            }
+
             if (id == "oilWell") {
                 //logger.log(id);
-                var oil = game.resPool.get("oil");
+                var oil = kg.resPool.get("oil");
                 if(oil.value == oil.maxValue){
                     baseutility = baseutility / 2;
                     buyableLog.log("%s: Penalty applied for produced resource maxxed %f", id, baseutility.toFixed(2));
@@ -670,17 +825,17 @@
                 baseutility = baseutility / 2;
                 buyableLog.log("%s: Penalty applied for not all in use %f", id, baseutility.toFixed(2));
             }
-                
+
             // Give them diminishing returns to incentivise climbing the tech tree faster.
             if(diminishingReturns){
                 const builtAlready = btn.model.metadata.val
-                utility = baseutility - game.getLimitedDR(builtAlready, baseutility);
+                utility = baseutility - kg.getLimitedDR(builtAlready, baseutility);
                 buyableLog.log("%s: %i Discounted utility: %f", id, builtAlready, utility.toFixed(2));
             } else {
                 utility = baseutility;
             }
             // Storage buildings are more useful than they appear naively, beacause we want to push up the tech tree for example.
-            if(outOfReach && Object.keys(btn.model.metadata.effects).find(e => e.endsWith("Max") || e.endsWith("MaxRatio")) ){            
+            if(outOfReach && Object.keys(btn.model.metadata.effects).find(e => e.endsWith("Max") || e.endsWith("MaxRatio")) ){
                 const additionalUtility = utilityForSorageCap(id , outOfReach, btn.model.metadata.effects);
                 buyableLog.log("%s: %f additional utility for storage cap: %f", id, additionalUtility.toFixed(2), utility.toFixed(2));
                 utility += additionalUtility
@@ -702,7 +857,7 @@
         const btn = getBuyables().find(b => buttonId(b) == btnName);
         if(!btn){
             return "Unknown button " + btnName;
-        }        
+        }
         const oor = getBuyables(false);
         return debug(() => buttonUtility(btn, oor), buyableLog);
     }
@@ -722,23 +877,23 @@
         for(var eff of productionEffects)
         {
             var resName = eff.substring(0, eff.indexOf("PerTickBase"));
-            var res = game.resPool.get(resName);
+            var res = kg.resPool.get(resName);
             if(res.value < res.maxValue)
                 return false;
         }
-        return true;    
+        return true;
     }
 
     function utilityForSorageCap(id, outOfReach, effects){
         var utility = 0;
         for(var infeasible of outOfReach){
             for(var price of infeasible.model.prices){
-                const resource = game.resPool.get(price.name);
+                const resource = kg.resPool.get(price.name);
                 if( resource.maxValue < price.val ){
                     const extraCap = price.val - resource.maxValue;
-                    const currentRatioEffect = 1 + game.getEffect(resource.name + "MaxRatio");
+                    const currentRatioEffect = 1 + kg.getEffect(resource.name + "MaxRatio");
                     var capIncrease = (effects[resource.name + "Max"] || 0) * currentRatioEffect;
-                    capIncrease *= 1 + game.prestige.getParagonStorageRatio();
+                    capIncrease *= 1 + kg.prestige.getParagonStorageRatio();
                     const capIncreaseRatio = effects[resource.name + "MaxRatio"] || 0;
                     if(!capIncrease && !capIncreaseRatio)
                         continue;
@@ -751,17 +906,17 @@
                     var percentOfRequired = Math.min(capIncrease / extraCap, 1);
                     if(percentOfRequired > 0){
                         var infeasibleUtility = buttonUtility(infeasible) * utilityFactorForInfeasible;
-                        var extraUtility = infeasibleUtility * percentOfRequired;                    
+                        var extraUtility = infeasibleUtility * percentOfRequired;
                         utility += extraUtility;
                         buyableLog.log(
-                            "%s: Contributes %f %s of %f needed for %s (utility %f) for %f extra utility. utilityForSorageCap %f", 
-                            id, 
-                            capIncrease.toFixed(1), 
-                            resource.name , 
+                            "%s: Contributes %f %s of %f needed for %s (utility %f) for %f extra utility. utilityForSorageCap %f",
+                            id,
+                            capIncrease.toFixed(1),
+                            resource.name ,
                             extraCap.toFixed(1) ,
-                            buttonId(infeasible), 
-                            infeasibleUtility.toFixed(4), 
-                            extraUtility.toFixed(4), 
+                            buttonId(infeasible),
+                            infeasibleUtility.toFixed(4),
+                            extraUtility.toFixed(4),
                             utility.toFixed(4))
                     }
                 }
@@ -777,7 +932,7 @@
             if(!buyable.startsWith('Build'))
                 continue;
             var numToBuy = plan[buyable];
-            if(numToBuy < buyThreshold)  
+            if(numToBuy < buyThreshold)
                 continue;
             var label = buyable.slice(6);
             var buyButtons = allBuyable.filter(b => buttonId(b) == label);
@@ -789,7 +944,7 @@
             if(canAffordNow(buyButton)){
                 var prevLeader = switchLeaderToBuy(buyButton);
                 buyableLog.info('Buying ' + label);
-                game.msg('9Souls: Buying ' + buttonLabel(buyButton));
+                kg.msg('9Souls: Buying ' + buttonLabel(buyButton));
                 executedPlan[buyable] = 1;
                 //console.debug(buyButton);
                 //console.debug(buyButton.buttonContent);
@@ -807,26 +962,26 @@
     //#endregion
 
     //#region Jobs
-    /* 
-    To stop kittens from starving sometimes we need to ensure a supply of farmers. 
+    /*
+    To stop kittens from starving sometimes we need to ensure a supply of farmers.
     Make sure a minimum number of kittens can farm if we project that nip will fall below our reserve threshold.
     */
 
     function reserveFarmers(){
-        var farmerJob = gamePage.village.getJob('farmer');
+        var farmerJob = kg.village.getJob('farmer');
         if(!farmerJob.unlocked)
             return 0; // Can't reserver a farmer if it's not unlocked.
-        var nipRes = gamePage.resPool.get('catnip');
+        var nipRes = kg.resPool.get('catnip');
         var projectedNip = projectResourceAmount(nipRes);
         var desiredEmergencyStash = reservedNipAmount();
         var desiredAdditionalNip = desiredEmergencyStash - projectedNip;
         if(desiredAdditionalNip <= 0)
             return 0; // No extra nip needed.
         var nipPerFarmer = resoucePerTick(nipRes, 1, farmerJob);
-        var desiredAdditionalNipPerTick = desiredAdditionalNip / (planHorizonSeconds() * gamePage.ticksPerSecond);
+        var desiredAdditionalNipPerTick = desiredAdditionalNip / (planHorizonSeconds() * kg.ticksPerSecond);
         var desiredReservedFarmers = desiredAdditionalNipPerTick / nipPerFarmer;
-        var reservedFarmers = Math.min(gamePage.resPool.get('kittens').value, Math.ceil(desiredReservedFarmers));
-        // jobLog.info("Projected 'nip %i, desired stash %i, additional extra nip per tick %f, farmer increment %f, desiredReservedFarmers %i", 
+        var reservedFarmers = Math.min(kg.resPool.get('kittens').value, Math.ceil(desiredReservedFarmers));
+        // jobLog.info("Projected 'nip %i, desired stash %i, additional extra nip per tick %f, farmer increment %f, desiredReservedFarmers %i",
         //     projectedNip,
         //     desiredEmergencyStash,
         //     desiredAdditionalNipPerTick,
@@ -837,9 +992,9 @@
     }
 
     function getJobAssignments() {
-        if(!gamePage.villageTab.visible)
+        if(!kg.villageTab.visible)
             return []
-        return game.village.jobs.filter(j => j.unlocked);
+        return kg.village.jobs.filter(j => j.unlocked);
     }
 
     function variableFromJobAssignment(j) {
@@ -847,16 +1002,16 @@
             name: "Job|" + buttonId(j),
             kittens: 1
         };
-        for(var mod in j.modifiers){        
-            var jobProduction = resoucePerTick(gamePage.resPool.resourceMap[mod], 1, j);
-            jv[mod] = -1 * jobProduction * planHorizonSeconds() * game.ticksPerSecond
+        for(var mod in j.modifiers){
+            var jobProduction = resoucePerTick(kg.resPool.resourceMap[mod], 1, j);
+            jv[mod] = -1 * jobProduction * planHorizonSeconds() * kg.ticksPerSecond
         }
         // Little jack to incentivise unlocking workshop
-        if(j.name == "miner" && !gamePage.bld.get("workshop").unlocked){
+        if(j.name == "miner" && !kg.bld.get("workshop").unlocked){
             jv.utility = 1;
         }
         else if (j.name == "priest"){
-            if(!gamePage.religionTab.visible){
+            if(!kg.religionTab.visible){
                 // Yeah - we should unlock that ;-)
                 jv.utility = 1;
             }
@@ -865,11 +1020,12 @@
     }
 
     function variableForFestival(){
-        if(!game.science.get("drama").researched)
+        if(!kg.science.get("drama").researched){
             return null;
-        if(game.calendar.festivalDays > (100 - gamePage.calendar.day))
+        }
+        if(kg.calendar.festivalDays > (100 - kg.calendar.day)){
             return null;
-        var doFest = game.villageTab.festivalBtn;
+        }
         return {
             name: "Festival",
             manpower: 1500,
@@ -881,37 +1037,68 @@
 
     function executeFestival(){
         var numPlanned = Math.floor(plan.Festival || 0);
-        if(!numPlanned)
+        if(!numPlanned){
             return;
+        }
         var numPerformed = (executedPlan.Festival || 0);
-        if(numPerformed > 0)
+        if(numPerformed > 0){
             return;
-        var doFest = game.villageTab.festivalBtn;
+        }
+        var doFest = kg.villageTab.festivalBtn;
         if(canAffordNow(doFest)){
             execLog.log("P A R T Y Wooop Woop!");
-            doFest.click();
+            doFest.buttonContent.click();
             executedPlan.Festival = 1;
         }
     }
 
     function jobResourcesMaxed(job){
         for(var modifier in job.modifiers){
-            var modifiedResource = game.resPool.get(modifier);
+            var modifiedResource = kg.resPool.get(modifier);
             if(modifiedResource.value < modifiedResource.maxValue)
                 return false;
         }
         return true;
     }
 
+    function normaliseObject(probabilities){
+        var total = 0;
+        var nonZeroCount = 0;
+        var totalCount = 0;
+        for(var job in probabilities){
+            totalCount++;
+            probabilities[job] = Math.max(probabilities[job], 0);
+            if(probabilities[job]){
+                nonZeroCount++;
+            }
+            total += probabilities[job];
+        }
+        if(total == 0){
+            if(nonZeroCount == 0){
+                for(var job in probabilities){
+                    probabilities[job] = 1 / totalCount;
+                }
+            } else {
+                for(var job in probabilities){
+                    probabilities[job] = probabilities[job] / nonZeroCount;
+                }
+            }
+        } else {
+            for(var job in probabilities){
+                probabilities[job] = probabilities[job] / total;
+            }
+        }
+        return probabilities;
+    }
+
     function normalizeAssignments(){
-        // TODO: Emergency farming if catnip < reservedAmount & gain per sec < 0
         var planned = {}
         var assignments = {}
         var invalidJobs = [];
         var partials = {}
         var wastedKittens = 0;
         var partialKittens = 0;
-        
+
         jobLog.log("getJobAssignments start");
         const jobs = getJobAssignments();
         jobLog.log("analyse start", jobs);
@@ -919,7 +1106,7 @@
         jobLog.log("assignments: ", assignments);
         jobLog.log("invalidJobs: ", invalidJobs);
         jobLog.log("partials: ", partials);
-        // remove kittens from jobs 
+        // remove kittens from jobs
         for(var j of jobs){
             var numPlanned = plan["Job|" + buttonId(j)] || 0;
             if(j.name == "farmer")
@@ -929,7 +1116,7 @@
             var partial = numPlanned - intPlanned;
             partialKittens += partial;
             // Remove assignments from maxxed out jobs.
-            if(jobResourcesMaxed(j) && intPlanned){
+            if(jobResourcesMaxed(j)){
                 jobLog.log("%s: Triggered waste detection. %i kittens doing job will be reallocated.", j.name, numPlanned);
                 wastedKittens += intPlanned;
                 assignments[j.name] = 0;
@@ -946,28 +1133,14 @@
         jobLog.log("assignments: ", assignments);
         jobLog.log("invalidJobs: ", invalidJobs);
         jobLog.log("partials: ", partials);
-    
+
         // Reassign wasted based on existing ratios...
         if(wastedKittens){
             const resassignProbs = {};
-            var validPlanned = 0
             for(var jobName in assignments){
-                validPlanned += 
-                    invalidJobs.find(ij => jobName == ij) ? 
-                        0 : 
-                        planned[jobName];
-                    jobLog.log("%s: validPlanned %f",jobName, validPlanned.toFixed(2));
+                resassignProbs[jobName] = invalidJobs.find(ij => jobName == ij) ? 0 : planned[jobName];
             }
-            for(var jobName in assignments){
-                if(validPlanned){
-                    resassignProbs[jobName] = 
-                        invalidJobs.find(ij => jobName == ij) ? 
-                            0 : planned[jobName] / validPlanned 
-                }
-                else {
-                    resassignProbs[jobName] = 1 / jobs.length;
-                }                        
-            }
+            normaliseObject(resassignProbs);
             jobLog.log("Reassigning %f wasted kittens, totalProb %f", wastedKittens, Object.values(resassignProbs).reduce((prev, curr) => prev + curr).toFixed(4), resassignProbs);
             for(var kIdx = 0; kIdx < wastedKittens; kIdx++){
                 var rj = Math.random();
@@ -983,24 +1156,15 @@
             }
             jobLog.log("waste reassignment complete", assignments);
         }
-    
+
         // Reassign partials
         if(partialKittens){
             partialKittens = Math.round(partialKittens);
             var resassignProbs = {};
-            var validPartials = 0
             for(var jobName in assignments){
-                validPartials += 
-                    invalidJobs.find(ij => jobName == ij) ? 
-                        0 : 
-                        partials[jobName];
-                    jobLog.log("%s: validPlanned %f",jobName, validPartials.toFixed(2));
+                resassignProbs[jobName] = invalidJobs.find(ij => jobName == ij) ? 0 : partials[jobName];
             }
-    
-            for(var j of jobs){
-                resassignProbs[j.name] = partials[j.name] / validPartials;
-            }
-
+            normaliseObject(resassignProbs);
             jobLog.log("Reassigning %f partial kittens, totalProb %f", partialKittens, Object.values(resassignProbs).reduce((prev, curr) => prev + curr).toFixed(4), resassignProbs);
             for(var kIdx = 1; kIdx < partialKittens + 0.1; kIdx++){
                 var rj = Math.random();
@@ -1021,8 +1185,8 @@
         for(var a in assignments){
             totalAssigned += assignments[a];
         }
-        if(totalAssigned != game.resPool.get("kittens").value)
-            jobLog.warn("assigned %i kittens (should have been %i)", totalAssigned, game.resPool.get("kittens").value);
+        if(totalAssigned != kg.resPool.get("kittens").value)
+            jobLog.warn("assigned %i kittens (should have been %i)", totalAssigned, kg.resPool.get("kittens").value);
 
         jobLog.log("normalise complete", assignments);
         return assignments;
@@ -1034,14 +1198,14 @@
         //jobLog.log(jobNumbers)
         for(var jobName in assignments) {
             var numPlanned = assignments[jobName];
-            var j = game.village.getJob(jobName)
+            var j = kg.village.getJob(jobName)
             //jobLog.log("Planned to assign ", numPlanned, " for job ", j.name, " currently job has ", j.value, " kittens assigned")
             if(j.value > numPlanned){
                 var numToRemove = j.value - numPlanned;
                 // A reassignment is moving a kitten from one job to another.
                 reassignments += numToRemove;
                 jobLog.log("Need to remove %i kittens from job %s (assigned %i, planned %i)", numToRemove, jobName, j.value, numPlanned);
-                var jobBtn = gamePage.villageTab.buttons.find(b => b.opts.job == j.name);
+                var jobBtn = kg.villageTab.buttons.find(b => b.opts.job == j.name);
                 if(numPlanned < 1){
                     //jobLog.debug("Removing all kittens from job ", j.name);
                     jobBtn.unassignLinks.unassignAll.link.click();
@@ -1067,12 +1231,12 @@
         // assign kittens to jobs
         for(var jobName in assignments) {
             var numPlanned = assignments[jobName];
-            var j = game.village.getJob(jobName)
+            var j = kg.village.getJob(jobName)
             if(j.value < numPlanned){
-                var jobBtn = gamePage.villageTab.buttons.find(b => b.opts.job == j.name);
+                var jobBtn = kg.villageTab.buttons.find(b => b.opts.job == j.name);
                 var numToAdd = numPlanned - j.value;
                 jobLog.log("Need to add %i kittens to job %s (assigned %i, planned %i)", numToAdd, jobName, j.value, numPlanned);
-                if(numToAdd == gamePage.village.getFreeKittens()){
+                if(numToAdd == kg.village.getFreeKittens()){
                     //jobLog.debug("Adding all free kittens to job ", j.name);
                     jobBtn.assignLinks.assignall.link.click();
                     return;
@@ -1099,11 +1263,11 @@
                 executedPlan["Job|" + jobName] = assignments[jobName];
         }
         jobLog.log("reassignments since optimise ", reassignments);
-        if(game.villageTab.optimizeJobsBtn && game.villageTab.optimizeJobsBtn.model.visible){
-            if(reassignments > reassignmentsBeforeOptimise * game.village.getKittens()){
-                jobLog.log("optimise triggered %i > %f (%f * %i)", reassignments, (reassignmentsBeforeOptimise * game.village.getKittens()).toFixed(1), reassignmentsBeforeOptimise, game.village.getKittens());
+        if(kg.villageTab.optimizeJobsBtn && kg.villageTab.optimizeJobsBtn.model.visible){
+            if(reassignments > reassignmentsBeforeOptimise * kg.village.getKittens()){
+                jobLog.log("optimise triggered %i > %f (%f * %i)", reassignments, (reassignmentsBeforeOptimise * kg.village.getKittens()).toFixed(1), reassignmentsBeforeOptimise, kg.village.getKittens());
                 reassignments = 0;
-                game.villageTab.optimizeJobsBtn.buttonContent.click();
+                kg.villageTab.optimizeJobsBtn.buttonContent.click();
             }
         }
     }
@@ -1112,12 +1276,10 @@
 
     //#region Trades
     function getTradeableRaces() {
-        return gamePage.diplomacy.races.filter(r => r.unlocked);
+        return kg.diplomacy.races.filter(r => r.unlocked);
     }
 
     function variableFromTrade(tradeRace, outOfReach) {
-        // TODO: Pretty sure I'm not doing tradeRatio correctly - is there a better way to simulate this as with production
-        // diplomacy.tradeImpl, but without side effects?
         tv = {
             name: "Trade|" + buttonId(tradeRace),
             manpower: 50,
@@ -1128,29 +1290,29 @@
             tv[res.name] = res.val;
         }
         var bonusForLeaderSwitch = tradeBonusForLeaderSwitch();
-        var standingRatio = game.getEffect("standingRatio") + game.diplomacy.calculateStandingFromPolicies(tradeRace.name, game);
+        var standingRatio = kg.getEffect("standingRatio") + kg.diplomacy.calculateStandingFromPolicies(tradeRace.name, kg);
         var failureChance = tradeRace.standing < 0 ? -(tradeRace.standing + standingRatio) / 2 : 0;
         var bonusTradeChance = tradeRace.standing > 0 ? tradeRace.standing + standingRatio / 2 : 0;
-        var tradeRatio = 1 + bonusForLeaderSwitch + game.diplomacy.getTradeRatio() + game.diplomacy.calculateTradeBonusFromPolicies(tradeRace.name, game) + game.challenges.getChallenge("pacifism").getTradeBonusEffect(game);
+        var tradeRatio = 1 + bonusForLeaderSwitch + kg.diplomacy.getTradeRatio() + kg.diplomacy.calculateTradeBonusFromPolicies(tradeRace.name, kg) + kg.challenges.getChallenge("pacifism").getTradeBonusEffect(kg);
         var raceRatio = 1 + tradeRace.energy * 0.02;
-        var currentSeason = game.calendar.getCurSeason().name;
-        var embassyEffect = game.ironWill ? 0.0025 : 0.01;
-        
+        var currentSeason = kg.calendar.getCurSeason().name;
+        var embassyEffect = kg.ironWill ? 0.0025 : 0.01;
+
         var tradeUtility = 0;
         for(sellResource of tradeRace.sells){
             //console.debug(res, tradeRace, res.minLevel, tradeRace.embassyLevel)
             // Mostly cribbed from diplomacy.tradeImpl
-            if (!game.diplomacy.isValidTrade(sellResource, tradeRace)) {
+            if (!kg.diplomacy.isValidTrade(sellResource, tradeRace)) {
                 continue;
             }
             var tradeChance = sellResource.chance *
                 (1 + (
                     tradeRace.embassyPrices ?
-                    game.getLimitedDR(tradeRace.embassyLevel * embassyEffect, 0.75) :
+                    kg.getLimitedDR(tradeRace.embassyLevel * embassyEffect, 0.75) :
                     0)
                 );
             var resourceSeasonTradeRatio = 1 + (sellResource.seasons ? sellResource.seasons[currentSeason] : 0);
-            expected = 
+            expected =
                 // Basic amount specified
                 sellResource.value
                 // Trades for hostile races may fail completely
@@ -1158,7 +1320,7 @@
                 // Trades with friendly races sometimes give you 25% extra
                 * (1 + (0.25 * bonusTradeChance))
                 // Rare resources only have some % chance to drop
-                * tradeChance 
+                * tradeChance
                 // Tradepost etc.
                 * tradeRatio
                 // Leviathans I think - haven't got that far yet.
@@ -1174,7 +1336,7 @@
     //~~----___  (_o_-~
     '           |/'
             */
-            sellResource = game.resPool.get(sellResource.name);
+            sellResource = kg.resPool.get(sellResource.name);
             reserved = sellResource.name == "catnip" ? reservedNipAmount() : 0;
             if(sellResource.maxValue)
                 expected = Math.min(expected, sellResource.maxValue - reserved);
@@ -1183,7 +1345,7 @@
             // Manuscript max culture bonus may influence trade utility
             if (sellResource.name == "manuscript") {
                 tradeUtility += manuscriptUtility(outOfReach) * expected;;
-            } 
+            }
             // compendium max science bonus may influence trade utility
             else if (sellResource.name == "compedium") {
                 tradeUtility += compendiumScienceUtility(outOfReach) * expected;
@@ -1195,15 +1357,15 @@
         tv.spice = -0.35 * (1 + (tradeRace.embassyPrices ?  tradeRace.embassyLevel * embassyEffect : 0))
         //-------------- 15% + 0.35% chance per ship to get titanium ---------------
         if (tradeRace.name == "zebras") {
-            var shipAmount = game.resPool.get("ship").value;
-            var zebraRelationModifierTitanium = game.getEffect("zebraRelationModifier") * game.bld.getBuildingExt("tradepost").meta.effects["tradeRatio"];
+            var shipAmount = kg.resPool.get("ship").value;
+            var zebraRelationModifierTitanium = kg.getEffect("zebraRelationModifier") * kg.bld.getBuildingExt("tradepost").meta.effects["tradeRatio"];
             tv.titanium = -(1.5 + shipAmount * 0.03) * (1 + zebraRelationModifierTitanium) * ((0.15 + shipAmount * 0.0035) / 2);
         }
 
         // Trades can generate Spice, which is a luxury. Grant some utility for that if we are below some threshold.
-        var spiceRes = game.resPool.get("spice");
+        var spiceRes = kg.resPool.get("spice");
         var spiceCons = resoucePerTick(spiceRes);
-        if(projectResourceAmount(spiceRes) < -1 * spiceCons * game.ticksPerSecond * planHorizonSeconds()){
+        if(projectResourceAmount(spiceRes) < -1 * spiceCons * kg.ticksPerSecond * planHorizonSeconds()){
             tradeUtility += happinessUtility;
         }
         if(tradeUtility)
@@ -1212,7 +1374,6 @@
     }
 
     function executeTrades(){
-        // TODO: shuffle trades so we don't always prioritise Griffins.
         for(tradeable in plan) {
             if(!tradeable.startsWith("Trade"))
                 continue;
@@ -1224,8 +1385,8 @@
                 tradeLog.log("No more trades desired with %s (planned %f executed %i)", raceName, desiredTrades.toFixed(1), executedTrades);
                 continue;
             }
-            //const race = game.diplomacy.get(raceName);
-            var tradeBtn = gamePage.diplomacyTab.racePanels.find(rp => rp.race.name == raceName).tradeBtn
+            //const race = kg.diplomacy.get(raceName);
+            var tradeBtn = kg.diplomacyTab.racePanels.find(rp => rp.race.name == raceName).tradeBtn
             //tradeLog.log(tradeBtn);
             var tradesPossibleNow = Math.floor(canAffordHowManyNow(tradeBtn));
             if(tradesPossibleNow < 1){
@@ -1233,20 +1394,20 @@
                 continue;
             }
             var tradesToPerform = Math.min(desiredRemainingTrades, tradesPossibleNow)
-            if(tradesToPerform <= 0){ 
-                tradeLog.log("I don't even know how I'd end up in this branch!?");  
+            if(tradesToPerform <= 0){
+                tradeLog.log("I don't even know how I'd end up in this branch!?");
                 continue;
             }
             if(!civilServiceNotResearched()){
                 var prevLeader = doLeaderChangeTrait("merchant");
-                tradeLog.log("Changed leader to trade previous ", prevLeader, " now ", game.village.leader);  
+                tradeLog.log("Changed leader to trade previous ", prevLeader, " now ", kg.village.leader);
             }
             for(tn = 0; tn < tradesToPerform; tn++){
                 // Good to free up capacity (looking at you sharks)
                 tradeLog.log("Executing crafts");
                 executeCrafts();
                 //var preTradeRes = copyCurrentResources();
-                //game.diplomacy.trade(race);
+                //kg.diplomacy.trade(race);
                 tradeLog.log("Executing trade with %s", raceName);
                 tradeBtn.buttonContent.click();
                 //var postTradeRes = copyCurrentResources();
@@ -1263,8 +1424,8 @@
             executeCrafts();
             executedPlan[tradeable] = executedTrades + tradesToPerform
             if(!civilServiceNotResearched()){
-                tradeLog.log("Resetting leader to ", prevLeader);  
-                changeLeader(prevLeader);                
+                tradeLog.log("Resetting leader to ", prevLeader);
+                changeLeader(prevLeader);
             }
         }
     }
@@ -1282,10 +1443,10 @@
     //#region Crafts
 
     function getCrafts(){
-        if(gamePage.workshopTab.visible)
-            return gamePage.workshopTab.craftBtns.filter(b => b.model.visible && isFeasible(b));
+        if(kg.workshopTab.visible)
+            return kg.workshopTab.craftBtns.filter(b => b.model.visible && isFeasible(b));
         else
-            return [gamePage.bldTab.children.find(btn => btn.model.name == "Refine catnip")];
+            return [kg.bldTab.children.find(btn => btn.model.name == "Refine catnip")];
     }
 
     function variableFromCraft(c, outOfReach){
@@ -1293,21 +1454,21 @@
         cv = {
             name: "Craft|" + craft
         };
-        var craftAmt = (1 + game.getResCraftRatio(craft) + craftBonusForLeaderSwitch(craft) - currentLeaderCraftBonus(craft))
+        var craftAmt = (1 + kg.getResCraftRatio(craft) + craftBonusForLeaderSwitch(craft) - currentLeaderCraftBonus(craft))
         craftLog.log(craft + " craftAmt " + craftAmt)
         cv[craft] = -craftAmt;
-        var craftPrices = game.workshop.getCraftPrice(c.model);
+        var craftPrices = kg.workshop.getCraftPrice(c.model);
         for(price of craftPrices){
             cv[price.name] = price.val;
         }
-        if(craft == "wood" && game.bld.buildingsData.find(b => b.name == 'hut').val < 1){
+        if(craft == "wood" && kg.bld.buildingsData.find(b => b.name == 'hut').val < 1){
             // We don't even have a hut yet, how quaint, we should do a little refining
             cv.utility = 1
             craftLog.log("wood craft utility: " + cv.utility)
         }
         // Mild bonus for unlock ziggurat
-        else if(craft == "megalith" || craft == "scaffold"){ 
-            if(!game.bld.get("ziggurat").unlocked && game.resPool.get(craft).value == 0){
+        else if(craft == "megalith" || craft == "scaffold"){
+            if(!kg.bld.get("ziggurat").unlocked && kg.resPool.get(craft).value == 0){
                 cv.utility = 0.4;
                 craftLog.log(craft + " craft utility: " + cv.utility)
             }
@@ -1316,7 +1477,7 @@
         else if(craft == "ship"){
             const maxShips = 5000;
             const fractionofShipsPerUtility = 0.15;
-            const builtAlready = game.resPool.get("ship").value;
+            const builtAlready = kg.resPool.get("ship").value;
             if(builtAlready == 0) {
                 cv.utility = 5;
                 craftLog.log("Initial ship craft utility: " + cv.utility)
@@ -1326,13 +1487,13 @@
                 cv.utility = utilityPerCraft;
                 craftLog.log("ship craft utility: " + cv.utility)
             }
-            const cargoShips = game.workshop.get("cargoShips");
+            const cargoShips = kg.workshop.get("cargoShips");
             if(cargoShips.researched){
                 // Buildings.js line ~850
                 //100% to 225% with slow falldown on the 75%
-                var limit = 2.25 + game.getEffect("shipLimit") * game.bld.get("reactor").on;
-                var ratioNow = 1 + game.getLimitedDR(cargoShips.effects["harborRatio"] * builtAlready, limit);
-                var ratioAfterCraft = 1 + game.getLimitedDR(cargoShips.effects["harborRatio"] * (builtAlready + craftAmt), limit);
+                var limit = 2.25 + kg.getEffect("shipLimit") * kg.bld.get("reactor").on;
+                var ratioNow = 1 + kg.getLimitedDR(cargoShips.effects["harborRatio"] * builtAlready, limit);
+                var ratioAfterCraft = 1 + kg.getLimitedDR(cargoShips.effects["harborRatio"] * (builtAlready + craftAmt), limit);
                 var ratioChange = ratioAfterCraft - ratioNow;
 
                 var shipStorageUtility = utilityForSorageCap("ship", outOfReach, {
@@ -1342,16 +1503,20 @@
                 cv.utility += shipStorageUtility;
                 craftLog.log("ship utility for storage: " + shipStorageUtility + " total ship craft utility" + cv.utility )
             }
-        } 
+        } else if (craft == "tanker"){
+            var tankerUtility = utilityForSorageCap("tanker", outOfReach, {oilMax: 500 * craftAmt});
+            craftLog.log("tanker utility for storage: " + tankerUtility)
+            cv.utility = tankerUtility;
+        }
         // Manuscript max culture bonus (and may incentivize early temple)
         else if (craft == "manuscript") {
             cv.utility = manuscriptUtility(outOfReach) * craftAmt;
             craftLog.log("manuscript craft utility: " + cv.utility)
-            if(!game.resPool.get(craft).value){
+            if(!kg.resPool.get(craft).value){
                 cv.utility += 1
                 craftLog.log("Bumping manuscript for initial manuscript: " + cv.utility)
             }
-        } 
+        }
         // compendium max science bonus minus penalty for losing manuscripts
         // nice typo in the craft name BTW
         else if (craft == "compedium") {
@@ -1372,18 +1537,18 @@
 
     function compendiumScienceUtility(outOfReach){
         // Workshop.js ~line 2592
-        var scienceMaxCap = game.bld.getEffect("scienceMax");
-        scienceMaxCap += game.getEffect("pyramidSpaceCompendiumRatio") * game.space.getEffect("scienceMax"); //lets treat trasnfered science max from space same way
-        if (game.ironWill) {
+        var scienceMaxCap = kg.bld.getEffect("scienceMax");
+        scienceMaxCap += kg.getEffect("pyramidSpaceCompendiumRatio") * kg.space.getEffect("scienceMax"); //lets treat trasnfered science max from space same way
+        if (kg.ironWill) {
             scienceMaxCap *= 10;
         }
-        if (game.prestige.getPerk("codexLeviathanianus").researched) {
-            var blackLibrary = game.religion.getTU("blackLibrary");
-            var ttBoostRatio = 1 + blackLibrary.val * (blackLibrary.effects["compendiaTTBoostRatio"] + game.getEffect("blackLibraryBonus"));
-            scienceMaxCap *= 1 + 0.05 * ttBoostRatio * this.game.religion.transcendenceTier;
+        if (kg.prestige.getPerk("codexLeviathanianus").researched) {
+            var blackLibrary = kg.religion.getTU("blackLibrary");
+            var ttBoostRatio = 1 + blackLibrary.val * (blackLibrary.effects["compendiaTTBoostRatio"] + kg.getEffect("blackLibraryBonus"));
+            scienceMaxCap *= 1 + 0.05 * ttBoostRatio * kg.religion.transcendenceTier;
         }
-        scienceMaxCap += game.bld.getEffect("scienceMaxCompendia");
-        var compendiaScienceMax = Math.floor(this.game.resPool.get("compedium").value * 10);
+        scienceMaxCap += kg.bld.getEffect("scienceMaxCompendia");
+        var compendiaScienceMax = Math.floor(kg.resPool.get("compedium").value * 10);
 
         // If we haven't capped max science bonus from compendia then we can incentivise making them based on increasing science storage.
         return compendiaScienceMax < scienceMaxCap ? utilityForSorageCap("compendia", outOfReach, {scienceMax: 10}) : 0;
@@ -1398,9 +1563,9 @@
 
     function manuscriptUtility(outOfReach){
             // Workshop.js ~line 2611
-            var cultureBonusRaw = Math.floor(game.resPool.get("manuscript").value);
-            var additionalMaxCultureFromManuscript = game.getUnlimitedDR(cultureBonusRaw + 1, 0.01) - game.getUnlimitedDR(cultureBonusRaw, 0.01);
-            additionalMaxCultureFromManuscript *= 1 + game.getEffect("cultureFromManuscripts");
+            var cultureBonusRaw = Math.floor(kg.resPool.get("manuscript").value);
+            var additionalMaxCultureFromManuscript = kg.getUnlimitedDR(cultureBonusRaw + 1, 0.01) - kg.getUnlimitedDR(cultureBonusRaw, 0.01);
+            additionalMaxCultureFromManuscript *= 1 + kg.getEffect("cultureFromManuscripts");
             var utility = utilityForSorageCap("manuscript", outOfReach, {cultureMax: additionalMaxCultureFromManuscript});
             craftLog.log("additionalMaxCultureFromManuscript %f, utility %f", additionalMaxCultureFromManuscript.toFixed(1), utility.toFixed(4));
             return utility;
@@ -1432,11 +1597,11 @@
             const numToActuallyCraft = Math.floor(Math.min(numCanAfford, numDesiredRemaining))
             if(numToActuallyCraft < 1)
                 continue;
-            
+
             switchLeaderToCraft(craftName);
             craftLog.log("Crafting %i %s (%i/%f)", numToActuallyCraft, craftName, alreadyDone + numToActuallyCraft, plan[craftable].toFixed(2))
             executedPlan[craftable] = alreadyDone + numToActuallyCraft;
-            game.workshop.craft(craftName, numToActuallyCraft)
+            kg.workshop.craft(craftName, numToActuallyCraft)
         }
     }
 
@@ -1447,32 +1612,32 @@
     function canUnlockRace(){
         // See diplomacy.js unlockRandomRace, ~ln 270
         // Is any of the "low requirement" 3 still locked
-        if(gamePage.diplomacy.races.slice(0, 3).find(r => !r.unlocked))
+        if(kg.diplomacy.races.slice(0, 3).find(r => !r.unlocked))
             return true;
-        var nagas = gamePage.diplomacy.get("nagas");
-        if (!nagas.unlocked && game.resPool.get("culture").value >= 1500){
-            return true;
-        }
-        var zebras = gamePage.diplomacy.get("zebras");
-        if (!zebras.unlocked && game.resPool.get("ship").value >= 1){
+        var nagas = kg.diplomacy.get("nagas");
+        if (!nagas.unlocked && kg.resPool.get("culture").value >= 1500){
             return true;
         }
-        var spiders = gamePage.diplomacy.get("spiders");
-        if (!spiders.unlocked && game.resPool.get("ship").value >= 100 && game.resPool.get("science").maxValue > 125000){
+        var zebras = kg.diplomacy.get("zebras");
+        if (!zebras.unlocked && kg.resPool.get("ship").value >= 1){
             return true;
         }
-        var dragons = gamePage.diplomacy.get("dragons");
-        if (!dragons.unlocked && game.science.get("nuclearFission").researched){
+        var spiders = kg.diplomacy.get("spiders");
+        if (!spiders.unlocked && kg.resPool.get("ship").value >= 100 && kg.resPool.get("science").maxValue > 125000){
+            return true;
+        }
+        var dragons = kg.diplomacy.get("dragons");
+        if (!dragons.unlocked && kg.science.get("nuclearFission").researched){
             return true;
         }
         return false;
     }
 
     function variableFromExplore() {
-        gamePage.diplomacyTab.render();
-        if(!gamePage.diplomacyTab.visible)
+        kg.diplomacyTab.render();
+        if(!kg.diplomacyTab.visible)
             return null;
-        if(!isFeasible(gamePage.diplomacyTab.exploreBtn)) 
+        if(!isFeasible(kg.diplomacyTab.exploreBtn))
             return null; // Get some more kittens you pleb.
         if(!canUnlockRace())
             return null;
@@ -1484,17 +1649,17 @@
     }
 
     function executeExplore() {
-        if(!gamePage.diplomacyTab.visible)
+        if(!kg.diplomacyTab.visible)
             return null;
         desiredExplore = (plan["Explore"] || 0);
         if(desiredExplore < 1)
             return;
 
-        var btn = gamePage.diplomacyTab.exploreBtn
-        if(canAffordNow(gamePage.diplomacyTab.exploreBtn)){
-            game.msg('9Souls: To seek out new life and new civilizations...');
-            btn.buttonContent.click();        
-            executedPlan.Explore = 1;        
+        var btn = kg.diplomacyTab.exploreBtn
+        if(canAffordNow(kg.diplomacyTab.exploreBtn)){
+            kg.msg('9Souls: To seek out new life and new civilizations...');
+            btn.buttonContent.click();
+            executedPlan.Explore = 1;
             jobLog.log("Replanning (explored)");
             planNow();
         }
@@ -1505,32 +1670,32 @@
     //#region Hunts
 
     function variableFromHunt(){
-        if(!gamePage.villageTab.visible || !gamePage.villageTab.huntBtn.model.visible)
+        if(!kg.villageTab.visible || !kg.villageTab.huntBtn.model.visible)
             return [];
-        hunterRatio = game.getEffect("hunterRatio") + game.village.getEffectLeader("manager", 0);
+        hunterRatio = kg.getEffect("hunterRatio") + kg.village.getEffectLeader("manager", 0);
         ivoryProb = (0.45 + 0.02 * hunterRatio) / 2;
         averageIvory = ivoryProb * (50 + (40 * hunterRatio));
         averageFurs = (80 + (65 * hunterRatio)) / 2;
-        
+
         // There is some utility to having a few luxury resources floating about (about a season's worth buffer?).
-        furRes = game.resPool.get('furs');
-        ivoryRes = game.resPool.get('ivory');
+        furRes = kg.resPool.get('furs');
+        ivoryRes = kg.resPool.get('ivory');
         furCons = resoucePerTick(furRes, 0, null);
         ivoryCons = resoucePerTick(ivoryRes, 0, null);
 
         utilityForLux = 0
-        var furDesiredToBuffer = -1 * furCons * game.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(furRes);
-        var huntsToFillFurBuffer = furDesiredToBuffer / averageFurs; 
+        var furDesiredToBuffer = -1 * furCons * kg.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(furRes);
+        var huntsToFillFurBuffer = furDesiredToBuffer / averageFurs;
         if(furDesiredToBuffer > 0){
             utilityForLux += happinessUtility;
         }
-        var ivoryDesiredToBuffer = -1 * ivoryCons * game.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(ivoryRes);
+        var ivoryDesiredToBuffer = -1 * ivoryCons * kg.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(ivoryRes);
         var huntsToFillIvoryBuffer = ivoryDesiredToBuffer / averageIvory;
         if(ivoryDesiredToBuffer > 0){
             utilityForLux += happinessUtility;
         }
         // Sooo sparkly.
-        unicornResource = game.resPool.get('unicorns');
+        unicornResource = kg.resPool.get('unicorns');
         if(unicornResource.value == 0){
             utilityForLux += 0.1;
         }
@@ -1569,23 +1734,23 @@
     }
 
     function executeHunts() {
-        if(!gamePage.villageTab.visible || !gamePage.villageTab.huntBtn.model.visible)
+        if(!kg.villageTab.visible || !kg.villageTab.huntBtn.model.visible)
             return;
         desiredHunts = Math.ceil((plan["Hunt|ForResources"] || 0) + (plan["Hunt|ForLuxury"] || 0));
         executedHunts = executedPlan["Hunt"] || 0;
         desiredRemainingHunts = desiredHunts - executedHunts;
         if(desiredRemainingHunts < 1)
             return;
-        possibleHuntsNow = Math.floor(game.resPool.get("manpower").value / 100);
+        possibleHuntsNow = Math.floor(kg.resPool.get("manpower").value / 100);
         if(possibleHuntsNow < 1)
             return;
         huntsToPerform = Math.min(desiredRemainingHunts, possibleHuntsNow)
         craftLog.log("Hunting ", huntsToPerform, huntsToPerform == possibleHuntsNow ? "  (as many as possible)" : ""," times (", executedHunts + huntsToPerform, "/", desiredHunts ,")")
         if(huntsToPerform == possibleHuntsNow){
-            gamePage.village.huntAll()
+            kg.village.huntAll()
         } else {
             for(i = 0; i < huntsToPerform; i++){
-                gamePage.villageTab.huntBtn.buttonContent.click()
+                kg.villageTab.huntBtn.buttonContent.click()
             }
         }
         executeCrafts();
@@ -1597,7 +1762,7 @@
     //#region Incrementable Building
 
     function getToggleableBuildings(){
-        return gamePage.bld.buildingsData.filter(function(b){return b.val > 0 && b.togglableOnOff; });
+        return kg.bld.buildingsData.filter(function(b){return b.val > 0 && b.togglableOnOff; });
     }
 
     function variableFromToggleableBuilding(bld){
@@ -1610,7 +1775,7 @@
         if(bldId == "steamworks"){
             bv.energy = -1 * effects.energyProduction * bld.val;
 
-            const magneto = game.bld.get("magneto");
+            const magneto = kg.bld.get("magneto");
             const maxMagnetoBoost = magneto.val * magneto.effects.magnetoRatio;
             const additionalBoostRatio = effects.magnetoBoostRatio * bld.val;
             const additionalBoostRatioEffect = maxMagnetoBoost * effects.magnetoBoostRatio * bld.val;
@@ -1626,14 +1791,14 @@
                 utility: bv.utility
             });
 
-            var coalRes = game.resPool.get("coal");
+            var coalRes = kg.resPool.get("coal");
             var coalNoSteam = resoucePerTick(coalRes, 0);
             var coalWithSteam = resoucePerTick(coalRes, 3, bld);
             var coalPerTickDiff = coalNoSteam - coalWithSteam;
-            bv.coal = coalPerTickDiff * game.ticksPerSecond * planHorizonSeconds();
+            bv.coal = coalPerTickDiff * kg.ticksPerSecond * planHorizonSeconds();
 
             if(effects.manuscriptPerTickProd){
-                bv.manuscript = -1 * effects.manuscriptPerTickProd * game.ticksPerSecond * planHorizonSeconds() * bld.val;
+                bv.manuscript = -1 * effects.manuscriptPerTickProd * kg.ticksPerSecond * planHorizonSeconds() * bld.val;
             }
         }
         return bv;
@@ -1647,14 +1812,14 @@
             const currentlyOn = bld.on == bld.val;
             if(wantedOn != currentlyOn){
                 buyableLog.log("%s desiredOn %s currentlyOn %s", bldId, wantedOn, currentlyOn);
-                var btn = gamePage.bldTab.children.find(btn => buttonId(btn) == bldId);
+                var btn = kg.bldTab.children.find(btn => buttonId(btn) == bldId);
                 btn.toggle.link.click();
             }
         }
     }
 
     function getIncrementableBuildings(){
-        return gamePage.bld.buildingsData.filter(b => b.val > 0 && b.togglable);
+        return kg.bld.buildingsData.filter(b => b.val > 0 && b.togglable);
     }
 
     function variableFromIncrementableBuilding(bld){
@@ -1677,13 +1842,19 @@
             if(effect == "energyProduction"){
                 bv.energy = -1 * effects[effect];
                 continue;
-            } 
+            }
             else if(effect == "energyConsumption"){
                 bv.energy = effects[effect];
                 continue;
-            } 
+            }
+            else if (effect == "craftRatio"){
+                bv.utility = (bv.utility || 0) + (utilityForCraftEffectiveness * 100 * effects[effect]);
+            }
             else if (effect == "magnetoRatio") {
-                bv.utility = globalProductionUtility * 100 * effects[effect];
+                bv.utility = (bv.utility || 0) + (globalProductionUtility * 100 * effects[effect]);
+            }
+            else if (effect == "productionRatio") {
+                bv.utility = (bv.utility || 0) + (globalProductionUtility * 100 * effects[effect]);
             }
             if(! (effect.endsWith('PerTickAutoprod') || effect.endsWith('PerTickCon') || effect.endsWith('PerTick') || effect.endsWith('PerTickBase') )){
                 //buyableLog.log("Ignoring effect ", effect, "(not production related)");
@@ -1694,19 +1865,19 @@
                 continue;
             }
             var resName = effect.slice(0, effect.indexOf('PerTick'));
-            var res = game.resPool.get(resName);
+            var res = kg.resPool.get(resName);
             //console.log(res)
             if(!res){
                 buyableLog.warn(bld, " is claiming to make a resource ", resName, " I can't find ", bld)
                 continue;
             }
             resRate = resoucePerTick(res, 2, bld);
-            bv[resName] = -resRate * game.ticksPerSecond * planHorizonSeconds();
+            bv[resName] = -resRate * kg.ticksPerSecond * planHorizonSeconds();
         }
 
         // Breweries should be off except during festivals.
         if(bldId == "brewery"){
-            if(game.calendar.festivalDays > 0){
+            if(kg.calendar.festivalDays > 0){
                 // Valueing happiness at ~0.2 per 10% currently.
                 bv.utility = happinessUtility * 3 / 100;
             } else {
@@ -1714,7 +1885,6 @@
             }
         }
 
-        // TODO: Pollution
         return bv;
     }
 
@@ -1736,14 +1906,14 @@
     }
 
     function executeIncrementableBuilding(){
-        for(var toggleableBld of getIncrementableBuildings()) {       
+        for(var toggleableBld of getIncrementableBuildings()) {
             var desiredOn = plan["IncrementBuilding|" + toggleableBld.name] || 0;
-            var bldBtn = gamePage.bldTab.children.find(btn => btn.opts.building == toggleableBld.name)
+            var bldBtn = kg.bldTab.children.find(btn => btn.opts.building == toggleableBld.name)
             var currentlyOn = bldBtn.model.on;
             var prob = desiredOn - Math.floor(desiredOn)
             if(Math.random() < prob)
                 desiredOn = Math.ceil(desiredOn)
-            else 
+            else
                 desiredOn = Math.floor(desiredOn)
             //buyableLog.log("%s desired on %i", toggleableBld.name, desiredOn);
             if(currentlyOn == desiredOn){
@@ -1793,14 +1963,14 @@
 
     //#region Simulate Production
     function copyCurrentResources(){
-        return game.resPool.resources.map(r => {return {resource: r.name, value: r.value}});
+        return kg.resPool.resources.map(r => {return {resource: r.name, value: r.value}});
     }
 
     function diffResources(before, after){
         var diffObj = {};
         if(before.length != after.length){
             logger.error("Resource arrays not of equal length. Unable to diff.");
-            return {}; 
+            return {};
         }
         for(var resIdx = 0; resIdx < before.length; resIdx++){
             var diff = after[resIdx].value - before[resIdx].value;
@@ -1812,7 +1982,7 @@
 
     function resoucePerTick(res, mode = 0, modeVariable = null) {
         simLog.log("resoucePerTick(%s, %i, %s)", res.name, mode, buttonId(modeVariable))
-        var productionStack = game.getResourcePerTickStack(res.name, false, game.calendar.season);
+        var productionStack = kg.getResourcePerTickStack(res.name, false, kg.calendar.season);
         if(mode == 3 && res.name == "coal"){
             if(productionStack.find(s => s.name == "Steamworks") == null){
                 productionStack.splice(8, 0, {name: "Steamworks", type: "ratio", value: modeVariable.effects.coalRatioGlobal});
@@ -1824,7 +1994,7 @@
     }
 
     function debugProdStack(resName, mode, modeVarName){
-        var res = game.resPool.get(resName);
+        var res = kg.resPool.get(resName);
         modeVar = null;
         switch(mode){
             case 1:
@@ -1832,13 +2002,13 @@
                 break;
             case 2:
             case 3:
-                modeVar = gamePage.bld.get(modeVarName);
+                modeVar = kg.bld.get(modeVarName);
         }
         return debug(() => resoucePerTick(res, mode, modeVar), simLog);
     }
 
     /*
-    mode: 
+    mode:
     0 / undefined - Non variable production
     1 - Single villager production (modeVariable = job)
     2 - Single building production (modeVariable = building)
@@ -1856,61 +2026,84 @@
                 prod += evaluateProductionStack(resourceModifier, resource, mode, modeVariable)
             // These are variable - we want to get production without these effects.
             else if(resourceModifier.name == '(:3) Village'){
-                simLog.log("village logic, mode ", mode)
                 if(mode == 1){
-                    simLog.log("adding one villager of production", modeVariable.modifiers, modeVariable.modifiers[resource.name])
-                    prod += (modeVariable.modifiers[resource.name] || 0) * gamePage.village.happiness
+                    simLog.log("Kitten: adding one villager of production", modeVariable.modifiers, modeVariable.modifiers[resource.name])
+                    prod += (modeVariable.modifiers[resource.name] || 0) * kg.village.happiness
                 } else {
-                    simLog.log("ignoring village production")
+                    simLog.log("Non-Kitten: ignoring village production")
                     continue;
                 }
             }
             else if (resourceModifier.name == "Production" && lastMod == null) {
                 switch(mode){
                     case 1:
-                        simLog.log("ignoring fixed production")
+                        simLog.log("Kitten: ignoring fixed production")
                         break;
                     case 0:
                     case 3:
+                        simLog.log("SimpleMode: Include fixed")
                         prod += resourceModifier.value;
                         break;
                     case 2:
-                        prod += effects[resource.name + "PerTickBase"] || 0;
+                        var bldFixed = effects[resource.name + "PerTickBase"] || 0;
+                        simLog.log("Building: Fixed production from bld %f", bldFixed.toFixed(2))
+                        prod += bldFixed;
                 }
             }
             else if (resourceModifier.name == 'Conversion Production' && lastMod == null){
                 if(mode == 2) {
-                    prod += (effects[resource.name + "PerTickAutoprod"] || 0);
-                } else {            
+                    var bldAutoprod = effects[resource.name + "PerTickAutoprod"] || 0;
+                    simLog.log("Building: Autoprod from bld %f", bldAutoprod.toFixed(2))
+                    prod += bldAutoprod;
+                } else {
+                    simLog.log("Non-Building: Ignoring '%s'", resourceModifier.name)
                     continue;
                 }
             }
             else if(resourceModifier.name == "Without Improvement" && lastMod == null){
                 if(mode == 2){
-                    prod += (effects[resource.name + "PerTick"] || 0)
+                    var withoutImp = effects[resource.name + "PerTick"] || 0;
+                    simLog.log("Building: PerTick from bld %f", withoutImp.toFixed(2))
+                    prod += withoutImp
                 } else {
+                    simLog.log("Non-Building: Ignoring '%s'", resourceModifier.name)
                     continue;
                 }
             }
             else if (resourceModifier.name == 'Conversion Production' && lastMod != null){
-                if(mode == 3) {
-                    prod += (effects[resource.name + "PerTickProd"] || 0) * modeVariable.val;
-                } else {
-                    continue;
+                switch(mode){
+                    case 0:
+                    case 1:
+                        simLog.log("Village / Fixed: Ingoring conversion")
+                        break;
+                    case 2:
+                        var perTickProd = effects[resource.name + "PerTickProd"] || 0;
+                        simLog.log("Building: Production from bld %f", perTickProd.toFixed(2));
+                        prod += perTickProd;
+                        break;
+                    case 3:
+                        var perTickProd = effects[resource.name + "PerTickProd"] || 0;
+                        simLog.log("Steamworks: PerTickProd each from bld %f", perTickProd.toFixed(2))
+                        prod += perTickProd * modeVariable.val;
+                        break;
                 }
             }
             else if (resourceModifier.name == 'Conversion Consumption'){
                 if(mode == 2){
-                    prod += (effects[resource.name + "PerTickCon"] || 0);
+                    var consump = (effects[resource.name + "PerTickCon"] || 0);
+                    simLog.log("Building: Consumption from bld %f", consump.toFixed(2))
+                    prod += consump;
                 } else {
+                    simLog.log("Non-Building: Ignoring '%s'", resourceModifier.name)
                     continue;
                 }
             }
             else if (resourceModifier.name == 'Steamworks' && mode != 3){
+                simLog.log("Non-Steamworks: Ignoring '%s'", resourceModifier.name)
                 continue;
             }
             // else if (resourceModifier.name == 'Magnetos'){
-            //     var magRatio = 1 + game.getEffect("magnetoRatio");
+            //     var magRatio = 1 + kg.getEffect("magnetoRatio");
             //     if(mode == 3){
             //         var swRatio = (1 + modeVariable.effects["magnetoBoostRatio"] * modeVariable.val);
             //         magRatio *= swRatio
@@ -1918,15 +2111,22 @@
             //     prod *= magRatio;
             // }
             else if (resourceModifier.type == 'fixed') {
-                if(mode == 0 || mode == 3)
+                if(mode == 0 || mode == 3){
+                    simLog.log("SimpleMode: Include fixed")
                     prod += resourceModifier.value;
-                else 
+                }
+                else {
+                    simLog.log("Non-SimpleMode: Exclude fixed")
                     continue;
+                }
             }
-            else if (resourceModifier.type == 'ratio')
+            else if (resourceModifier.type == 'ratio'){
+                simLog.log("Include ratio effect")
                 prod *= 1 + resourceModifier.value;
-            //else
-            //    console.warn("Didn't know how to include calculation of ", resourceModifier, " in evaluateProductionStackNonVariable.");
+            }
+            else {
+                simLog.log("Didn't know how to include calculation of ", resourceModifier, " in evaluateProductionStackNonVariable.");
+            }
             lastMod = resourceModifier
         }
         return prod;
@@ -1934,21 +2134,21 @@
 
     function projectResourceAmount(res) {
         var baseProduction = resoucePerTick(res, 0, null);
-        var projected = res.value + (baseProduction * gamePage.ticksPerSecond * planHorizonSeconds());
-        var timeRatioBonus = 1 + game.getEffect("timeRatio") * 0.25;
-        var chanceRatio = (game.prestige.getPerk("chronomancy").researched ? 1.1 : 1) * timeRatioBonus;
+        var projected = res.value + (baseProduction * kg.ticksPerSecond * planHorizonSeconds());
+        var timeRatioBonus = 1 + kg.getEffect("timeRatio") * 0.25;
+        var chanceRatio = (kg.prestige.getPerk("chronomancy").researched ? 1.1 : 1) * timeRatioBonus;
         if(res.name == "science"){
             // Astro events.
-            var eventChance = (0.0025 + game.getEffect("starEventChance")) * chanceRatio;
-            if (this.game.prestige.getPerk("astromancy").researched) {
+            var eventChance = (0.0025 + kg.getEffect("starEventChance")) * chanceRatio;
+            if (kg.prestige.getPerk("astromancy").researched) {
                 eventChance *= 2;
             }
             // Evaluated once per day.
             var astroEventsExpected = eventChance * planHorizonSeconds() / 2;
-            var celestialBonus = game.workshop.get("celestialMechanics").researched
-                ? (game.ironWill ? 1.6 : 1.2)
+            var celestialBonus = kg.workshop.get("celestialMechanics").researched
+                ? (kg.ironWill ? 1.6 : 1.2)
                 : 1;
-            var sciBonus = 25 * celestialBonus * (1 + this.game.getEffect("scienceRatio"));
+            var sciBonus = 25 * celestialBonus * (1 + kg.getEffect("scienceRatio"));
             // starchart bonus
             sciBonus *= Math.max(1, eventChance);
             projected += astroEventsExpected * sciBonus;
@@ -1957,21 +2157,21 @@
             return 0;
         if(res.maxValue)
             return Math.min(projected, res.maxValue);
-        else    
+        else
             return projected;
     }
 
     // Reserve several days of nip
     function reservedNipAmount(){
-        var nipDemandRatio = 1 + gamePage.globalEffectsCached.catnipDemandRatio;
-        var ktns = gamePage.resPool.resourceMap["kittens"].value ;
-        return ktns * nipDemandRatio * gamePage.village.happiness * 4 * reservedNipDays 
+        var nipDemandRatio = 1 + kg.globalEffectsCached.catnipDemandRatio;
+        var ktns = kg.resPool.resourceMap["kittens"].value ;
+        return ktns * nipDemandRatio * kg.village.happiness * 4 * reservedNipDays
     }
 
     //#endregion
 
     //#region Include External Libraries
-
+    var solver;
     function includeSolver() {
         if (typeof solver !== 'undefined') {
             console.log("solver already included");
@@ -1989,8 +2189,38 @@
     }
 //    includeSolver();
 
+
+    var logger;
+    var leaderLog;
+    var faithLog;
+    var execLog;
+    var buyableLog;
+    var jobLog;
+    var craftLog;
+    var simLog;
+    var tradeLog;
+    function makeLogger(logname) {
+        var l = woodman.getLogger(logname);
+        l.level = "info";
+        return l;
+    }
+
+    function setupLoggers(){
+        woodman.load('console');
+        logger ||= makeLogger("main")
+        leaderLog ||= makeLogger("main.Leader");
+        faithLog ||= makeLogger("main.faith");
+        execLog ||= makeLogger("main.Execution");
+        buyableLog ||= makeLogger("main.buyable");
+        jobLog ||= makeLogger("main.Jobs");
+        craftLog ||= makeLogger("main.Craft");
+        simLog ||= makeLogger("main.Simulate");
+        tradeLog ||= makeLogger("main.Trade");
+    }
+
     function includeLoglevel() {
         if (typeof woodman !== 'undefined') {
+            setupLoggers();
             logger.log("woodman already included");
             return;
         }
@@ -1998,26 +2228,6 @@
         xhttp.onreadystatechange = function() {
             if (this.readyState == 4 && this.status == 200) {
             eval(xhttp.responseText);
-            // TODO: This line doesn't actually init the logger. woodman.load('console') needs to be called manually :-(
-            woodman.load('console');
-            window.logger = woodman.getLogger('main');
-            logger.level = "info";
-            window.leaderLog = woodman.getLogger("main.Leader");
-            leaderLog.level = "info";
-            window.faithLog = woodman.getLogger("main.faith");
-            faithLog.level = "info";
-            window.execLog = woodman.getLogger("main.Execution");
-            execLog.level = "info";
-            window.buyableLog = woodman.getLogger("main.buyable");
-            buyableLog.level = "info";
-            window.jobLog = woodman.getLogger("main.Jobs");
-            jobLog.level = "info";
-            window.craftLog = woodman.getLogger("main.Craft");
-            craftLog.level = "info";
-            window.simLog = woodman.getLogger("main.Simulate");
-            simLog.level = "info";
-            window.tradeLog = woodman.getLogger("main.Trade");
-            tradeLog.level = "info";
 
             logger.log("woodman downloaded, executed and initialized");
             }
@@ -2032,13 +2242,13 @@
     //#region Leadership
 
     function civilServiceNotResearched(){
-        return !game.science.get("civil").researched;
+        return !kg.science.get("civil").researched;
     }
 
     function kittenWithTrait(desiredTrait){
         if(civilServiceNotResearched())
             return null;
-        var candidates = game.village.sim.kittens.filter(k => k.trait && k.trait.name == desiredTrait);
+        var candidates = kg.village.sim.kittens.filter(k => k.trait && k.trait.name == desiredTrait);
         if(!candidates.length)
             return null;
         var bestBoi = null;
@@ -2056,7 +2266,7 @@
     function doLeaderChangeTrait(desiredTrait){
         if(civilServiceNotResearched())
             return null;
-        var previousLeader = game.village.leader
+        var previousLeader = kg.village.leader
         changeLeader(kittenWithTrait(desiredTrait));
         return previousLeader;
     }
@@ -2066,10 +2276,10 @@
             return;
         if(!kitten)
             return;
-        if(game.village.leader == kitten)
+        if(kg.village.leader == kitten)
             return;
         //console.debug("Chaging leader to ", kitten.name, " ", kitten.surname, " (rank ", kitten.rank, kitten.trait ? kitten.trait.name : "", ")")
-        game.villageTab.censusPanel.census.makeLeader(kitten);
+        kg.villageTab.censusPanel.census.makeLeader(kitten);
     }
 
     function craftBonusForLeaderSwitch(craftName){
@@ -2083,12 +2293,12 @@
     function currentLeaderCraftBonus(craftName){
         if(civilServiceNotResearched())
             return 0;
-        if(!game.village.leader)
+        if(!kg.village.leader)
             return 0;
-        if(!game.village.leader.trait)
+        if(!kg.village.leader.trait)
             return 0;
         for(desiredEffect of leaderDesiredTraitsFromCraft(craftName)){
-            if(game.village.leader.trait.name == desiredEffect.trait)
+            if(kg.village.leader.trait.name == desiredEffect.trait)
                 return desiredEffect.bonus;
         }
         return 0;
@@ -2097,14 +2307,14 @@
     function tradeBonusForLeaderSwitch(){
         if(civilServiceNotResearched())
             return 0;
-        if(game.village.leader && game.village.leader.trait && game.village.leader.trait.name == "merchant")
+        if(kg.village.leader && kg.village.leader.trait && kg.village.leader.trait.name == "merchant")
             return 0;
-        var burnedParagonRatio = 1 + game.prestige.getBurnedParagonRatio();
+        var burnedParagonRatio = 1 + kg.prestige.getBurnedParagonRatio();
         var leaderRatio = 1;
-        if (game.science.getPolicy("monarchy").researched){
+        if (kg.science.getPolicy("monarchy").researched){
             leaderRatio = 1.95;
         }
-        if(kittenWithTrait("merchant")) 
+        if(kittenWithTrait("merchant"))
             return 0.03 * burnedParagonRatio * leaderRatio;
         return 0;
     }
@@ -2115,13 +2325,13 @@
             //console.debug("Attempting to switch leader to craft (so fickle)");
         for(var desiredTrait of leaderDesiredTraitsFromCraft(craftName)){
             // Do we already have leader with this trait?
-            if(game.village.leader && game.village.leader.trait && game.village.leader.trait.name == desiredTrait.trait){
+            if(kg.village.leader && kg.village.leader.trait && kg.village.leader.trait.name == desiredTrait.trait){
                 //console.debug("Leader already has trait", desiredTrait.trait);
                 return null;
             }
             var newLeader = kittenWithTrait(desiredTrait.trait)
             if(newLeader){
-                prevLeader = game.village.leader;
+                prevLeader = kg.village.leader;
                 //console.debug("Switching from ", prevLeader, " to ", newLeader);
                 changeLeader(newLeader);
                 return prevLeader;
@@ -2134,9 +2344,9 @@
     }
 
     function leaderDesiredTraitsFromCraft(craftName){
-        var burnedParagonRatio = 1 + game.prestige.getBurnedParagonRatio();
+        var burnedParagonRatio = 1 + kg.prestige.getBurnedParagonRatio();
         var leaderRatio = 1;
-        if (game.science.getPolicy("monarchy").researched){
+        if (kg.science.getPolicy("monarchy").researched){
             leaderRatio = 1.95;
         }
         switch(craftName){
@@ -2153,7 +2363,7 @@
             case "thorium":
                 return [{trait: "chemist", bonus: 0.075 * leaderRatio * burnedParagonRatio}, {trait: "engineer", bonus: 0.05 * leaderRatio * burnedParagonRatio}];
             default: {
-                var craftableResource = game.resPool.get(craftName);
+                var craftableResource = kg.resPool.get(craftName);
                 if(craftableResource.craftable)
                     return [{trait: "engineer", bonus: 0.05 * leaderRatio * burnedParagonRatio}];
                 else
@@ -2163,14 +2373,14 @@
     }
 
     function kittenForPromotion() {
-        var fnRankBy = (a, b) => { 
+        var fnRankBy = (a, b) => {
             var aIsManager = a.trait && a.trait.name == "manager";
             var bIsManager = b.trait && b.trait.name == "manager";
             if(aIsManager){
                 if(bIsManager){
-                    if(a.rank > b.rank) 
-                        return a; 
-                    else 
+                    if(a.rank > b.rank)
+                        return a;
+                    else
                         return b;
                 } else {
                     return a;
@@ -2179,30 +2389,31 @@
                 if(bIsManager){
                     return b;
                 } else {
-                    if(a.rank > b.rank) 
-                        return a; 
-                    else 
+                    if(a.rank > b.rank)
+                        return a;
+                    else
                         return b;
                 }
             }
         };
-        return game.village.sim.kittens.reduce(fnRankBy);
+        return kg.village.sim.kittens.reduce(fnRankBy);
     }
 
     function variableForPromoteLeader(){
         if(civilServiceNotResearched())
             return null;
         var highRank = kittenForPromotion();
-        var expToPromote = game.village.sim.expToPromote(highRank.rank, highRank.rank + 1, highRank.exp)
+        var expToPromote = kg.village.sim.expToPromote(highRank.rank, highRank.rank + 1, highRank.exp)
         // Not much we can do about a lack of experience.
         if(!expToPromote[0])
             return null;
         // We just need to find out how much, hence assume infinite resource.
-        var goldToPromote = game.village.sim.goldToPromote(highRank.rank, highRank.rank + 1, Infinity)
+        var goldToPromote = kg.village.sim.goldToPromote(highRank.rank, highRank.rank + 1, Infinity)
         return {
             name: "PromoteLeader",
             gold: goldToPromote[1],
-            utility: 2
+            utility: 2,
+            promotion: 1
         };
     }
 
@@ -2215,11 +2426,11 @@
             return null;
         const timeEnter = performance.now();
         var highRank = kittenForPromotion();
-        var expToPromote = game.village.sim.expToPromote(highRank.rank, highRank.rank + 1, highRank.exp);
-        var goldToPromote = game.village.sim.goldToPromote(highRank.rank, highRank.rank + 1, game.resPool.get("gold").value);
+        var expToPromote = kg.village.sim.expToPromote(highRank.rank, highRank.rank + 1, highRank.exp);
+        var goldToPromote = kg.village.sim.goldToPromote(highRank.rank, highRank.rank + 1, kg.resPool.get("gold").value);
         if (expToPromote[0] && goldToPromote[0]) {
             execLog.info("Congrats to %s %s who was promoted from rank %i to %i", highRank.name, highRank.surname, highRank.rank, highRank.rank + 1)
-            game.village.sim.promote(highRank);
+            kg.village.sim.promote(highRank);
             executedPlan.PromoteLeader = 1;
         }
         const timeExit = performance.now();
@@ -2249,26 +2460,26 @@
         if(limitingFactors.length == 0)
             return null;
         // Religion Upgrade
-        var burnedParagonRatio = 1 + game.prestige.getBurnedParagonRatio();
+        var burnedParagonRatio = 1 + kg.prestige.getBurnedParagonRatio();
         var leaderRatio = 1;
-        if (game.science.getPolicy("monarchy").researched){
+        if (kg.science.getPolicy("monarchy").researched){
             leaderRatio = 1.95;
         }
         if(btn.model.prices.find(p => p.name == "faith")){
             // Current leader is already wise. swapping doesn't help.
-            if(game.village.leader && game.village.leader.trait && game.village.leader.trait.name == "wise")
-                return null;    
+            if(kg.village.leader && kg.village.leader.trait && kg.village.leader.trait.name == "wise")
+                return null;
             // No wise kitten to swap to.
             if(!kittenWithTrait("wise"))
                 return null;
-            var reductionRatio = game.getLimitedDR((0.09 + 0.01 * burnedParagonRatio) * leaderRatio, 1.0); 
+            var reductionRatio = kg.getLimitedDR((0.09 + 0.01 * burnedParagonRatio) * leaderRatio, 1.0);
             for(var factor of limitingFactors){
                 // Wisdom only helps with faith and gold.
                 if(! (factor.name == "faith" || factor.name == "gold")){
                     //leaderLog.log("needs non faith / gold resource");
                     return null;
                 }
-                var limRes = game.resPool.get(factor.name);
+                var limRes = kg.resPool.get(factor.name);
                 var resourceValue = feasibilityStudy ? limRes.maxValue : limRes.value;
                 //leaderLog.log("%s needed %i, resourceValue %i, reductionFactor %f, amountNeededWithReduction %f", factor.name, factor.val, resourceValue, reductionRatio, factor.val * (1 - reductionRatio));
                 if(resourceValue < factor.val * (1 - reductionRatio)){
@@ -2286,8 +2497,8 @@
         {
             //leaderLog.log("Evaluating canSwapLeaderToPurchase for %s", buttonId(btn));
             // Current leader is already wise. swapping doesn't help.
-            if(game.village.leader && game.village.leader.trait && game.village.leader.trait.name == "scientist")
-                return null;    
+            if(kg.village.leader && kg.village.leader.trait && kg.village.leader.trait.name == "scientist")
+                return null;
             //leaderLog.log("Leader is not yet scientist");
             // No sciencey kitten to swap to.
             if(!kittenWithTrait("scientist"))
@@ -2298,10 +2509,10 @@
                 return null;
             //leaderLog.log("We only need to help science");
             var factor = limitingFactors[0];
-            var limRes = game.resPool.get(factor.name);
+            var limRes = kg.resPool.get(factor.name);
             var resourceValue = feasibilityStudy ? limRes.maxValue : limRes.value;
-            var reductionRatio = game.getLimitedDR(0.05 * burnedParagonRatio  * leaderRatio, 1.0); //5% before BP
-            
+            var reductionRatio = kg.getLimitedDR(0.05 * burnedParagonRatio  * leaderRatio, 1.0); //5% before BP
+
             //leaderLog.log("Science needed %i, resourceValue %i, reductionFactor %f, amountNeededWithReduction %f", factor.val, resourceValue, reductionRatio, factor.val * (1 - reductionRatio));
 
             if(resourceValue > factor.val * (1 - reductionRatio)){
@@ -2318,30 +2529,30 @@
     }
 
     function leaderDiscountRatio(btn, resName){
-        var burnedParagonRatio = 1 + this.game.prestige.getBurnedParagonRatio();
+        var burnedParagonRatio = 1 + kg.prestige.getBurnedParagonRatio();
         var leaderRatio = 1;
-        if (this.game.science.getPolicy("monarchy").researched){
+        if (kg.science.getPolicy("monarchy").researched){
             leaderRatio = 1.95;
         }
-        if((isWorkshopButton(btn) || isScienceButton(btn)) && 
-            resName == "science" && 
+        if((isWorkshopButton(btn) || isScienceButton(btn)) &&
+            resName == "science" &&
             kittenWithTrait("scientist") &&
             leaderTrait() != "scientist") {
-            return 1 - (game.getLimitedDR(0.05 * burnedParagonRatio  * leaderRatio, 1.0));
+            return 1 - (kg.getLimitedDR(0.05 * burnedParagonRatio  * leaderRatio, 1.0));
         } else if(
-            isFaithButton(btn) && 
-            (resName == "faith" || resName == "gold") && 
+            isFaithButton(btn) &&
+            (resName == "faith" || resName == "gold") &&
             kittenWithTrait("wise") &&
             leaderTrait() != "wise") {
-            return 1 - (game.getLimitedDR((0.09 + 0.01 * burnedParagonRatio) * leaderRatio, 1.0));
+            return 1 - (kg.getLimitedDR((0.09 + 0.01 * burnedParagonRatio) * leaderRatio, 1.0));
         } else {
             return 1;
         }
     }
 
     function leaderTrait(){
-        if(game.village.leader && game.village.leader.trait)
-            return game.village.leader.trait.name;
+        if(kg.village.leader && kg.village.leader.trait)
+            return kg.village.leader.trait.name;
         return "";
     }
 
@@ -2349,24 +2560,29 @@
 
     //#region Faith
 
-    // TODO: Adore
-    // TODO: Transcend
+    function variableForTranscend(){
+        if(!kg.religionTab.visible ||
+        !kg.religionTab.transcendBtn ||
+        !kg.religionTab.transcendBtn.model.visible)
+            return null;
+
+    }
 
     function variableForAdoreGalaxy(){
-        if(!gamePage.religionTab.visible ||
-        !gamePage.religionTab.adoreBtn || 
-        !gamePage.religionTab.adoreBtn.model.visible)
+        if(!kg.religionTab.visible ||
+        !kg.religionTab.adoreBtn ||
+        !kg.religionTab.adoreBtn.model.visible)
             return null;
         // Ok Adore is a valid action.
         const agVar = {
             name: "AdoreTheGalaxy"
         };
-        var worship = game.religion.faith
-        var ttPlus1 = (game.religion.getRU("transcendence").on ? game.religion.transcendenceTier : 0) + 1;
-        var currFaithRatio = game.religion.faithRatio;
+        var worship = kg.religion.faith
+        var ttPlus1 = (kg.religion.getRU("transcendence").on ? kg.religion.transcendenceTier : 0) + 1;
+        var currFaithRatio = kg.religion.faithRatio;
         var faithRatioIncrease = worship / 1000000 * ttPlus1 * ttPlus1 * 1.01;
-        var currApocBonus = game.religion.getApocryphaBonus();
-        var newApocBonus = game.getUnlimitedDR(currFaithRatio + faithRatioIncrease, 0.1) * 0.1;
+        var currApocBonus = kg.religion.getApocryphaBonus();
+        var newApocBonus = kg.getUnlimitedDR(currFaithRatio + faithRatioIncrease, 0.1) * 0.1;
         var apocBonusIncrease = newApocBonus - currApocBonus;
 
         var currentSolRevBonus = calculateSolarRevolutionRatio(worship);
@@ -2374,20 +2590,18 @@
     }
 
     function variableForPraiseSun(){
-        if(!gamePage.religionTab.visible)
+        if(!kg.religionTab.visible)
             return null;
-        gamePage.religionTab.render();
-        const halfFaith = game.resPool.get("faith").maxValue / 2;
-        const additionalWorship = halfFaith * (1 + game.religion.getApocryphaBonus());
-        // TODO: Faith is not 1-1 with worship after apocrypha / transcend etc.
+        kg.religionTab.render();
+        const halfFaith = kg.resPool.get("faith").maxValue / 2;
+        const additionalWorship = halfFaith * (1 + kg.religion.getApocryphaBonus());
         // What a crumbily named variable :-(. Hysterical raisins I suppose.
-        const worship = game.religion.faith;
-        const nextUnlockBtn = gamePage.religionTab.rUpgradeButtons.find(ru => !ru.model.visible);
-        const revolutionBtn = gamePage.religionTab.rUpgradeButtons.find(ru => ru.id == "solarRevolution");
+        const worship = kg.religion.faith;
+        const nextUnlockBtn = kg.religionTab.rUpgradeButtons.find(ru => !ru.model.visible);
+        const revolutionBtn = kg.religionTab.rUpgradeButtons.find(ru => ru.id == "solarRevolution");
         // Utility for unlocking another option to work towards.
         const worshipToUnlockNextOption = nextUnlockBtn ? nextUnlockBtn.model.metadata.faith - worship: -1;
         const howFarDoesPraiseGetUs = Math.min(1, additionalWorship / worshipToUnlockNextOption);
-        //TODO: Does below utility for faith unlock in variableForPraiseSun perform better (it's more consistant at least)
         //var utility = nextUnlockBtn ? howFarDoesPraiseGetUs * buttonUtility(nextUnlockBtn) * utilityFactorForInfeasible : 0;
         var utility = nextUnlockBtn ? howFarDoesPraiseGetUs : 0;
         faithLog.log("Utility for unlocks: %f (additionalWorship: %f, worshipToUnlockNextOption: %f, howFarDoesPraiseGetUs: %f)", utility, additionalWorship, worshipToUnlockNextOption, howFarDoesPraiseGetUs);
@@ -2409,8 +2623,8 @@
 
     // religion.js getSolarRevolutionRatio line 1068
     function calculateSolarRevolutionRatio (worship) {
-        var uncappedBonus = game.religion.getRU("solarRevolution").on ? game.getUnlimitedDR(worship, 1000) / 100 : 0;
-        return game.getLimitedDR(uncappedBonus, 10 + game.getEffect("solarRevolutionLimit") + (game.challenges.getChallenge("atheism").researched ? (game.religion.transcendenceTier) : 0)) * (1 + game.getLimitedDR(game.getEffect("faithSolarRevolutionBoost"), 4));
+        var uncappedBonus = kg.religion.getRU("solarRevolution").on ? kg.getUnlimitedDR(worship, 1000) / 100 : 0;
+        return kg.getLimitedDR(uncappedBonus, 10 + kg.getEffect("solarRevolutionLimit") + (kg.challenges.getChallenge("atheism").researched ? (kg.religion.transcendenceTier) : 0)) * (1 + kg.getLimitedDR(kg.getEffect("faithSolarRevolutionBoost"), 4));
     }
 
     function praiseUnderPlan(){
@@ -2420,22 +2634,22 @@
         var praiseToDo = plannedPraise - (executedPlan["PraiseTheSun"] || 0);
         if(praiseToDo <= 0)
             return;
-        var faithAmount = game.resPool.get("faith").value;
-        var halfFaith = game.resPool.get("faith").maxValue / 2;
+        var faithAmount = kg.resPool.get("faith").value;
+        var halfFaith = kg.resPool.get("faith").maxValue / 2;
         var praisesAvailable = faithAmount / halfFaith;
         //console.log("praiseToDo: %i, faithAmount: %i, halfFaith: %i, praisesAvailable: %i", praiseToDo, faithAmount, halfFaith, praisesAvailable);
         if(praisesAvailable > 1){
             faithLog.info("About to paise %i ", praisesAvailable);
-            gamePage.religionTab.praiseBtn.buttonContent.click();
+            kg.religionTab.praiseBtn.buttonContent.click();
             executedPlan.PraiseTheSun = (executedPlan.PraiseTheSun || 0) + praisesAvailable;
         }
     }
 
     function variableForSacrifice(){
-        if(!gamePage.religionTab.visible)
+        if(!kg.religionTab.visible)
             return null;
-        var zigs = game.bld.get("ziggurat").val;
-        if(game.bld.get("ziggurat").val == 0)
+        var zigs = kg.bld.get("ziggurat").val;
+        if(kg.bld.get("ziggurat").val == 0)
             return null;
         var su = {
             name: "SacrificeUnicorns",
@@ -2443,7 +2657,7 @@
             tears: -zigs
         }
         // Tears are a luxury.
-        if(game.resPool.get("tears").value == 0)
+        if(kg.resPool.get("tears").value == 0)
             su.utility = 0.1;
         return su;
     }
@@ -2451,20 +2665,20 @@
     function sacrificeUnderPlan(){
         if(!plan)
             return;
-        if(!gamePage.religionTab.visible)
+        if(!kg.religionTab.visible)
             return null;
-        if(game.bld.get("ziggurat").val == 0)
+        if(kg.bld.get("ziggurat").val == 0)
             return null;
         var executedSacs = executedPlan["SacrificeUnicorns"] || 0;
         var plannedSac = Math.floor(plan["SacrificeUnicorns"] || 0);
         var sacsDesired = plannedSac - executedSacs;
-        var sacsPossible = Math.floor(game.resPool.get("unicorns").value / 2500.0);
+        var sacsPossible = Math.floor(kg.resPool.get("unicorns").value / 2500.0);
         var sacsToDo = Math.min(sacsPossible, sacsDesired)
         if(sacsToDo <= 0)
             return;
         for(var i = 0; i < sacsToDo; i++){
             faithLog.info("I will bathe in unicorn tears!");
-            gamePage.religionTab.sacrificeBtn.buttonContent.click()
+            kg.religionTab.sacrificeBtn.buttonContent.click()
         }
         executedPlan["SacrificeUnicorns"] = executedSacs + sacsToDo;
     }
@@ -2528,16 +2742,19 @@
 
 
     function recordHistory(){
-        var historyString = `${game.stats.getStatCurrent("timePlayed").val.padEnd(18)}${game.stats.getStat("totalResets").val + 1}.${game.calendar.year}`;
+        var historyString = `${kg.stats.getStatCurrent("timePlayed").val.padEnd(18)}${kg.stats.getStat("totalResets").val + 1}.${kg.calendar.year}`;
         historyString = historyString.padEnd(28);
-        historyString += `${game.resPool.get("kittens").maxValue} kittens ${mostAdvancedResearch(game.science.techs)}, ${mostAdvancedResearch(game.workshop.upgrades)}`
+        historyString += `${kg.resPool.get("kittens").maxValue} kittens ${mostAdvancedResearch(kg.science.techs)}, ${mostAdvancedResearch(kg.workshop.upgrades)}`
 //         historyString += `
 
 // `;
-//         var data = game.save();
-// 		data = JSON.stringify(data);
-//         var encodedData = game.compressLZData(data);
+//         var data = kg.save();
+//         data = JSON.stringify(data);
+//         var encodedData = kg.compressLZData(data);
 //         historyString += encodedData;
+        // if(kg.spaceTab.visible){
+        //     historyString +=
+        // }
         logger.info(historyString);
     }
 
@@ -2551,9 +2768,9 @@
                     continue;
                 //logger.log(plan[planItem])
                 pu.push({
-                    name: planItem, 
-                    utilityPerItem: model.variables[planItem].utility.toFixed(2), 
-                    quantity: plan[planItem].toFixed(2), 
+                    name: planItem,
+                    utilityPerItem: model.variables[planItem].utility.toFixed(2),
+                    quantity: plan[planItem].toFixed(2),
                     previousQuantity: (lastPlan ? (lastPlan[planItem] || 0) : 0).toFixed(2),
                     quantityChange: (plan[planItem] - (lastPlan ? (lastPlan[planItem] || 0) : 0)).toFixed(2),
                     totalUtility: (model.variables[planItem].utility * plan[planItem]).toFixed(2)});
@@ -2588,10 +2805,10 @@
 
     function CircularBuffer(length){
 
-        var pointer = 0, buffer = new Array(length), itemsPushed = 0; 
-        
+        var pointer = 0, buffer = new Array(length), itemsPushed = 0;
+
         return {
-        
+
         get  : function(key){return buffer[((pointer - 1) - key + length) % length];},
         push : function(item){
             buffer[pointer] = item;
@@ -2614,19 +2831,19 @@
 
     function shuffle(array) {
         let currentIndex = array.length,  randomIndex;
-    
+
         // While there remain elements to shuffle.
         while (currentIndex != 0) {
-    
+
         // Pick a remaining element.
         randomIndex = Math.floor(Math.random() * currentIndex);
         currentIndex--;
-    
+
         // And swap it with the current element.
         [array[currentIndex], array[randomIndex]] = [
             array[randomIndex], array[currentIndex]];
         }
-    
+
         return array;
     }
 
@@ -2659,15 +2876,15 @@
 
     //  // the only difference between minBy and maxBy is the ordering
     // // function, so abstract that out
-    // Array.prototype.minBy = function(fn) { 
-    //     return this.extremumBy(fn, Math.min); 
+    // Array.prototype.minBy = function(fn) {
+    //     return this.extremumBy(fn, Math.min);
     //   };
-    
-    //   Array.prototype.maxBy = function(fn) { 
+
+    //   Array.prototype.maxBy = function(fn) {
     //     return this.extremumBy(fn, Math.max);
     //   };
-    
-        
+
+
     //#endregion Utilities
 
     //#region Reset
@@ -2677,18 +2894,18 @@
         if(planningForResetSince){
             return planningForResetSince;
         }
-        var paragon = game.resPool.get("paragon").value;
-        var totalParagon = paragon + game.resPool.get("burnedParagon").value;
+        var paragon = kg.resPool.get("paragon").value;
+        var totalParagon = paragon + kg.resPool.get("burnedParagon").value;
         if(totalParagon == 0){
             // First reset after Concrete Huts is a typical kind of time.
             // Researching apocripha should also be a priority as epiphany carries over.
-            if(game.workshop.get("concreteHuts").researched && game.religion.getRU("apocripha").on){
+            if(kg.workshop.get("concreteHuts").researched && kg.religion.getRU("apocripha").on){
                 planningForResetSince = new Date();
             }
         } else {
             // Lets try to increase paragon by specifed ratio.
-            var resetParagon = game.getResetPrestige().paragonPoints;
-            if(resetParagon >= (paragon * paragonPerResetRatio) && game.religion.getRU("apocripha").on){
+            var resetParagon = kg.getResetPrestige().paragonPoints;
+            if(resetParagon >= (paragon * paragonPerResetRatio) && kg.religion.getRU("apocripha").on){
                 planningForResetSince = new Date();
             }
         }
@@ -2705,11 +2922,12 @@
         if(timeLeftSecs <= 0)
         {
             execLog.warn("Goodbye cruel world!");
-            // TODO: Neutered this logic as it went wrong in last reset. Monitor and check.
             // Should always be true I think, but who knows - this code is hard to test ;-)
-            // if(game.religionTab.adoreBtn.model.visible)
-            //     game.religionTab.adoreBtn.buttonContent.click();
-            // game.reset();
+            if(kg.religionTab.adoreBtn.model.visible){
+                kg.religion.praise();
+                kg.religionTab.adoreBtn.buttonContent.click();
+            }
+            kg.reset();
             return;
         }
 
@@ -2733,8 +2951,8 @@
     //#region Sell
 
     function getSellable(){
-        return gamePage.bldTab.children.slice(2).filter(b => 
-            b.model.showSellLink && 
+        return kg.bldTab.children.slice(2).filter(b =>
+            b.model.showSellLink &&
             b.model.metadata.val > 0 &&
             b.sellHref
             );
@@ -2771,7 +2989,7 @@
             // Ok I suppose we're really doing this!
             var sellBtn = getSellable().find(s => buttonId(s) == sellItemId);
             if(!sellBtn || !sellBtn.sellHref || !sellBtn.sellHref.link)
-            game.msg('9Souls: Selling ' + buttonLabel(sellBtn) + "!");
+            kg.msg('9Souls: Selling ' + buttonLabel(sellBtn) + "!");
             executeCrafts();
             sellBtn.sellHref.link.click();
             executedPlan["Sell|" + sellItemId] = 1;
@@ -2781,6 +2999,112 @@
 
     //#endregion
 
-includeLoglevel();
-includeSolver();
-    //})();
+    //#region UI
+
+    var btnBegin;
+    var planDisplay;
+    var modelDisplay;
+
+    function addElement(parent, elementName, elementAttrs, innerText){
+        const element = document.createElement(elementName);
+        if(elementAttrs){
+            Object.keys(elementAttrs).forEach(k => {
+                element.setAttribute(k, elementAttrs[k]);
+            });
+        }
+        if(innerText){
+            element.innerText = innerText;
+        }
+        let parentNode;
+        switch (typeof parent){
+            case "string":
+                parentNode = document.getElementById(parent);
+                break;
+            case "object":
+                parentNode = parent;
+                break;
+            case "undefined":
+            default:
+                parentNode = document.getElementsByTagName("body")[0];
+                break;
+        }
+        parentNode.appendChild(element);
+        return element;
+    }
+
+    function makeUi(){
+        if(document.getElementById("9s"))
+            return;
+        var scriptUi = addElement("game", "div", {id: "9s", style: "position: absolute; bottom: 0;"});
+        addElement(scriptUi, "span", {class: "gameTitle"}, "9-Souls: Kitten Auomation Engine");
+        addElement(scriptUi, "br");
+        btnBegin = addElement(scriptUi, "button", {id: "9s-startStop" }, "Go!");
+        btnBegin.addEventListener("click", uiStopStart, true);
+        planDetails = addElement(scriptUi, "details", {id: "9s-plan"});
+        addElement(planDetails, "summary", null, "Current Plan:");
+        planDisplay = addElement(planDetails, "ul");
+
+        modelDisplay = addElement(scriptUi, "span", {id: "9s-model"});
+    }
+
+    function updatePlanUi(){
+        const segmentedPlan = segmentPlan(plan);
+        const segmentedExecution = segmentPlan(executedPlan);
+        if(!planDisplay){
+            return;
+        }
+        var planDescription = describePlanForUi(segmentedPlan, segmentedExecution);
+        planDisplay.innerHTML = planDescription;
+    }
+
+    function describePlanForUi(segmentedPlan, segmentedExecution){
+        return Object.keys(segmentedPlan).reduce((descString, planKey) => {
+            descString += "<li>" + planKey;
+            if(typeof segmentedPlan[planKey] === "object"){
+                descString += describePlanPart(segmentedPlan[planKey], segmentedExecution);
+            } else {
+                descString += segmentedPlan[planKey];
+            }
+            descString += "</li>";
+            return descString;
+        }, "");
+    }
+
+    function describePlanPart(planPart, segmentedExecution){
+        return Object.keys(planPart).reduce((descString, planPartKey) => {
+            descString += "<li>" + planPartKey + ":" + planPart[planPartKey].toFixed(2);
+            if(segmentedExecution[planPart] && segmentedExecution[planPart][planPartKey]){
+                descString += "(" + segmentedExecution[planPart][planPartKey] + ")"
+            }
+            return descString + "</li>";
+        }, "<ul>") + "</ul>";
+    }
+
+    function uiStopStart(event){
+        if(isRunning){
+            stop();
+            event.target.innerText = "Go!";
+        } else {
+            go();
+            event.target.innerText = "Stop!";
+        }
+    }
+
+    //#endregion
+
+    return {
+        go: go,
+        stop: stop,
+        includeLoglevel: includeLoglevel,
+        includeSolver: includeSolver,
+        recordHistory: recordHistory,
+        makeUi: makeUi
+    };
+}();
+
+if(!GM_addElement) {
+    // Loaded from console like the old days. Include the scripts that tamper monkey "requires".
+    window.nineSouls.includeLoglevel();
+    window.nineSouls.includeSolver();
+}
+window.nineSouls.makeUi();

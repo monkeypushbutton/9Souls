@@ -20,10 +20,8 @@
 /*jslint eval */
 /*jslint for:true */
 /*jslint todo:true*/
-/*global window*/
 
 // TODO: Kittens massacre in year 1 due to building too many huts. Sad but not a deal breaker.
-// TODO: UI often doesn't refresh after script takes an action. Smelters going on and off are a case in point.
 // TODO: Pollution. Incentivise not increasing levels.
 // TODO: Lazy crafting / trading. Only perform desired crafts when resources near limit, or in process of actually using them
 // Rationale: We might happen to improve craft efficiency first and hence will end up being more efficient overall.
@@ -33,17 +31,25 @@
 // TODO: LP Still wants to assign kittens to e.g. scientist when resource is at max at certain points. I'm manually correcting for it right now, which sucks.
 // TODO: Script is murdering kittens with gay abandon in cold winters. Once that is fixed, reservedNipDays can be reduced.
 // TODO: Emergency farming if catnip < reservedAmount & gain per sec < 0
-// TODO: shuffle trades / crafts so we don't always prioritise one thing.
+// TODO: shuffle crafts so we don't always prioritise one thing.
 // TODO: evaluateProductionStack can't handle ratioIndent, mulltiplier and maybe perYear
-// TODO: Adore and transcend.
 // TODO: Check math in variableForPraise Faith is not 1-1 with worship after apocrypha / transcend etc.
 // TODO: Check alternative utility for faith unlock in variableForPraiseSun may perform better (it's more consistant at least)
 // TODO: Selling things might me beneficial occasionally. e.g. swapping Unicorn Pastures for Ziggurat structures
 // Some code for selling exists, but it's a bit buggy.
+// TODO: Script doesn't calculate the coal penalty for steamworks correctly. It effects geologists as well as fixed production.
+// Script therefore generally overestimates amount of steel it can produce for example.
 
-"use strict";
+// I'd like to but it interferes with external libraries when plonking script in console.
+//"use strict";
+var GM_addElement;
+var unsafeWindow;
+// Allow script to be loaded outside Tampermonkey.
+if(!GM_addElement) {
+    unsafeWindow = window;
+}
 
-window.nineSouls = function() {
+unsafeWindow.nineSouls = function() {
     // How long between executions of plan.
     // Setting this too low will be spammy and may slow game.
     // Setting too high may cause missed observations, more 0 / max resource inefficiencies etc.
@@ -69,7 +75,7 @@ window.nineSouls = function() {
     var reassignmentsBeforeOptimise = 0.5;
     // Amount of catnip to reserve in units of "days of consumption". This should be approximately
     // the number of days we can fall into a new season without replanning, plus a little bit for safety?
-    // Or even more for safety if you have murdering kittens I suppose.
+    // Or even more for safety if you hate murdering kittens I suppose.
     var reservedNipDays = 100;
 
     // Somtimes plan will want two things using similar resources.
@@ -85,7 +91,7 @@ window.nineSouls = function() {
     var policyUtility = 2;
     var embassyUtility = 0.25;
     var bldUtility = 0.95;
-    var spaceGcUtility = 10;
+    var spaceGcUtility = 3;
 
     // How much additional utility is granted for expanding storage to build things that are currently
     // out of reach (as a multiplier of the basic utility of the infeasible thing)
@@ -106,6 +112,11 @@ window.nineSouls = function() {
     // After first reset, which happens after concrete huts, amount of paragon game will attempt
     // to accrue (as a multiple of current paragon). 1 = Reset to double paragon.
     var paragonPerResetRatio = 0.9;
+
+    // If we detect that we can "Adore the Galaxy" and the go on to recover
+    // our solar revolution bonus in less than the below amout of time it will
+    // trigger a mid-run "Transcend / Adore / Praise" cycle.
+    var maxTimeToRecoverWorshipAfterAdoreHours = 8;
 
     // Latest version of the game this script was tested / developed against.
     // See game.telemetry, checked at startup.
@@ -134,10 +145,24 @@ window.nineSouls = function() {
     function go(checkVersion = true) {
         ensureKgReference();
         setupLoggers();
-        // Important to not stall when choosing a policy upgrade.
         kg.msg('9Souls: Starting');
         isRunning = true;
+
+        // Important to not stall when choosing a policy upgrade.
         kg.opts.noConfirm = true;
+
+        // Also transcending :-( Ok we're monkey patching I suppose.
+        // Transcend (and maybe other places?) unconditionally call game.ui.confirm
+        // patch that function to internally check if noConfirm is set and respect it.
+        game.ui.nineSoulSafeConfirm = game.ui.confirm;
+        kg.ui.confirm = function(title, msg, callbackOk, callbackCancel) {
+            if(kg.opts.noConfirm){
+                callbackOk();
+            } else {
+                kg.ui.nineSoulSafeConfirm(title, msg, callbackOk, callbackCancel);
+            }
+        };
+
         if(checkVersion && !checkVersionIsTested()){
             return;
         }
@@ -146,7 +171,7 @@ window.nineSouls = function() {
     }
 
     function checkVersionIsTested() {
-        if(supportedVersions.indexOf(game.telemetry.version) == -1)
+        if(supportedVersions.indexOf(kg.telemetry.version) == -1)
         {
             logger.warn("Game version %s does not match tested version %s. Here be dragons. Make a backup and call go(false), or update user script to proceed.",
             kg.telemetry.version,
@@ -232,15 +257,12 @@ window.nineSouls = function() {
             planNow();
         }
         //console.time("executePlan");
-        // Note that actions that produce resources (hunt, trade, sell) should re-execute crafting
+        executeTrades();
+        executeHunts();
         executeCrafts();
 
         observeTheSky();
         controlGatherLoop();
-        executeHunts();
-
-        executeExplore();
-        executeTrades();
 
         executeSellItems();
         executeIncrementableBuilding();
@@ -253,6 +275,7 @@ window.nineSouls = function() {
         executeFestival();
         promoteUnderPlan();
         considerUpgrade();
+        executeExplore();
         doLeaderChangeTrait("manager");
 
         var bought = false;
@@ -265,7 +288,7 @@ window.nineSouls = function() {
             planNow();
             executePlanNow(timesBought + 1);
         }
-        updatePlanUi();
+        updateUi();
     }
 
     function observeTheSky(){
@@ -677,8 +700,13 @@ window.nineSouls = function() {
         drama: 1,
         // Bloody hippies
         ecology: 4,
-        // Script spends a lot of time with capped pop buildings, republic is *probably* better.
-        // authocracy: 0.9,
+
+        // Policies
+        // https://wiki.kittensgame.com/en/guides-and-advice-and-stuff/monstrous-advice
+        tradition: 1.5,
+        clearCutting: 1.5,
+        monarchy: 1.1,
+        epicurianism: 1.1,
 
         // Faith
         templars: 2,
@@ -717,10 +745,15 @@ window.nineSouls = function() {
         workshop: (btn) => firstTimesTheCharm(btn, utilityForCraftEffectiveness * 6),
         library: (btn) => firstTimesTheCharm(btn, 1),
         temple: (btn) => firstTimesTheCharm(btn, 1),
+
+        // Space
         // Starcharts are a huuge bottleneck.
         sattelite: (btn) => firstTimesTheCharm(btn, 3),
+        spaceElevator: 4,
+        spaceStation: 2,
 
-        faithTab: [faithUtility, ]
+
+        //faithTab: [faithUtility, ]
     };
 
     function isPolicy(btn){
@@ -1239,7 +1272,7 @@ window.nineSouls = function() {
                 if(numToAdd == kg.village.getFreeKittens()){
                     //jobLog.debug("Adding all free kittens to job ", j.name);
                     jobBtn.assignLinks.assignall.link.click();
-                    return;
+                    break;
                 }
                 while(numToAdd > 0){
                     if(numToAdd >= 25){
@@ -1279,15 +1312,12 @@ window.nineSouls = function() {
         return kg.diplomacy.races.filter(r => r.unlocked);
     }
 
-    function variableFromTrade(tradeRace, outOfReach) {
-        tv = {
-            name: "Trade|" + buttonId(tradeRace),
-            manpower: 50,
-            gold: 15,
-            blueprint: -0.1
-        };
-        for(res of tradeRace.buys){
-            tv[res.name] = res.val;
+    function expectedResourceGain(tradeRace, sellResource){
+        if(tradeRace.name == "zebras" && sellResource == "titanium"){
+            //-------------- 15% + 0.35% chance per ship to get titanium ---------------
+            var shipAmount = kg.resPool.get("ship").value;
+            var zebraRelationModifierTitanium = kg.getEffect("zebraRelationModifier") * kg.bld.getBuildingExt("tradepost").meta.effects["tradeRatio"];
+            return (1.5 + shipAmount * 0.03) * (1 + zebraRelationModifierTitanium) * ((0.15 + shipAmount * 0.0035) / 2);
         }
         var bonusForLeaderSwitch = tradeBonusForLeaderSwitch();
         var standingRatio = kg.getEffect("standingRatio") + kg.diplomacy.calculateStandingFromPolicies(tradeRace.name, kg);
@@ -1298,35 +1328,52 @@ window.nineSouls = function() {
         var currentSeason = kg.calendar.getCurSeason().name;
         var embassyEffect = kg.ironWill ? 0.0025 : 0.01;
 
+        if (!kg.diplomacy.isValidTrade(sellResource, tradeRace)) {
+            return 0;
+        }
+        var tradeChance = sellResource.chance *
+            (1 + (
+                tradeRace.embassyPrices ?
+                kg.getLimitedDR(tradeRace.embassyLevel * embassyEffect, 0.75) :
+                0)
+            );
+        var resourceSeasonTradeRatio = 1 + (sellResource.seasons ? sellResource.seasons[currentSeason] : 0);
+        expected =
+            // Basic amount specified
+            sellResource.value
+            // Trades for hostile races may fail completely
+            * (1 - failureChance)
+            // Trades with friendly races sometimes give you 25% extra
+            * (1 + (0.25 * bonusTradeChance))
+            // Rare resources only have some % chance to drop
+            * tradeChance
+            // Tradepost etc.
+            * tradeRatio
+            // Leviathans I think - haven't got that far yet.
+            * raceRatio
+            // Seasonality of resources
+            * resourceSeasonTradeRatio;
+        return expected;
+    }
+
+    function variableFromTrade(tradeRace, outOfReach) {
+        tv = {
+            name: "Trade|" + buttonId(tradeRace),
+            manpower: kg.diplomacy.getManpowerCost(),
+            gold: kg.diplomacy.getGoldCost(),
+            blueprint: -0.1
+        };
+        for(res of tradeRace.buys){
+            tv[res.name] = res.val;
+        }
+
         var tradeUtility = 0;
-        for(sellResource of tradeRace.sells){
+        for(const sellResource of tradeRace.sells){
             //console.debug(res, tradeRace, res.minLevel, tradeRace.embassyLevel)
             // Mostly cribbed from diplomacy.tradeImpl
-            if (!kg.diplomacy.isValidTrade(sellResource, tradeRace)) {
+            var expected = expectedResourceGain(tradeRace, sellResource);
+            if(!expected)
                 continue;
-            }
-            var tradeChance = sellResource.chance *
-                (1 + (
-                    tradeRace.embassyPrices ?
-                    kg.getLimitedDR(tradeRace.embassyLevel * embassyEffect, 0.75) :
-                    0)
-                );
-            var resourceSeasonTradeRatio = 1 + (sellResource.seasons ? sellResource.seasons[currentSeason] : 0);
-            expected =
-                // Basic amount specified
-                sellResource.value
-                // Trades for hostile races may fail completely
-                * (1 - failureChance)
-                // Trades with friendly races sometimes give you 25% extra
-                * (1 + (0.25 * bonusTradeChance))
-                // Rare resources only have some % chance to drop
-                * tradeChance
-                // Tradepost etc.
-                * tradeRatio
-                // Leviathans I think - haven't got that far yet.
-                * raceRatio
-                // Seasonality of resources
-                * resourceSeasonTradeRatio;
             //console.debug(sellResource.value, failureChance, bonusTradeChance, tradeChance, tradeRatio, raceRatio, resourceSeasonTradeRatio)
             //console.debug(expected)
 
@@ -1336,12 +1383,11 @@ window.nineSouls = function() {
     //~~----___  (_o_-~
     '           |/'
             */
-            sellResource = kg.resPool.get(sellResource.name);
-            reserved = sellResource.name == "catnip" ? reservedNipAmount() : 0;
-            if(sellResource.maxValue)
-                expected = Math.min(expected, sellResource.maxValue - reserved);
-
-
+            var sellResPoolRes = kg.resPool.get(sellResource.name);
+            reserved = sellResPoolRes.name == "catnip" ? reservedNipAmount() : 0;
+            if(sellResPoolRes.maxValue){
+                expected = Math.min(expected, sellResPoolRes.maxValue - reserved);
+            }
             // Manuscript max culture bonus may influence trade utility
             if (sellResource.name == "manuscript") {
                 tradeUtility += manuscriptUtility(outOfReach) * expected;;
@@ -1353,13 +1399,10 @@ window.nineSouls = function() {
 
             tv[sellResource.name] = -expected
         }
-
+        var embassyEffect = kg.ironWill ? 0.0025 : 0.01;
         tv.spice = -0.35 * (1 + (tradeRace.embassyPrices ?  tradeRace.embassyLevel * embassyEffect : 0))
-        //-------------- 15% + 0.35% chance per ship to get titanium ---------------
         if (tradeRace.name == "zebras") {
-            var shipAmount = kg.resPool.get("ship").value;
-            var zebraRelationModifierTitanium = kg.getEffect("zebraRelationModifier") * kg.bld.getBuildingExt("tradepost").meta.effects["tradeRatio"];
-            tv.titanium = -(1.5 + shipAmount * 0.03) * (1 + zebraRelationModifierTitanium) * ((0.15 + shipAmount * 0.0035) / 2);
+            tv.titanium = -expectedResourceGain(tradeRace, "titanium");
         }
 
         // Trades can generate Spice, which is a luxury. Grant some utility for that if we are below some threshold.
@@ -1368,15 +1411,57 @@ window.nineSouls = function() {
         if(projectResourceAmount(spiceRes) < -1 * spiceCons * kg.ticksPerSecond * planHorizonSeconds()){
             tradeUtility += happinessUtility;
         }
-        if(tradeUtility)
+        if(tradeUtility){
             tv.utility = tradeUtility;
+        }
         return tv;
     }
 
-    function executeTrades(){
-        for(tradeable in plan) {
-            if(!tradeable.startsWith("Trade"))
+    // Maximum number of trades to perform now such that we don't go over our resource caps.
+    function maxTradesBatch(race){
+        var maxTradesToCap = Infinity;
+        for(sellResource of race.sells){
+            //you must be this tall to trade this rare resource
+            if (!kg.diplomacy.isValidTrade(sellResource, race)) {
                 continue;
+            }
+            var res = kg.resPool.get(sellResource.name);
+            var cap = res.maxValue
+            if(!cap) {
+                continue;
+            }
+            var capLessCurrent = cap - res.value;
+            var maxTradeAmt = expectedResourceGain(race, sellResource) * (1 + sellResource.width);
+            var tradesBeforeMax = capLessCurrent / maxTradeAmt;
+            maxTradesToCap = Math.min(maxTradesToCap, tradesBeforeMax);
+        }
+        if(race.name == "zebras"){
+            // fuck you zebras
+            // Multiplier is chosen out of thin air because I'm lazy.
+            // Also hee hee titMaxGain.
+            var titMaxGain = expectedResourceGain(race, "titanium") * 1.5;
+            var res = kg.resPool.get("titanium");
+            var titCapLessCurrent = res.maxValue - res.value;
+            var titTradesBeforeMax = titCapLessCurrent / titMaxGain;
+            maxTradesToCap = Math.min(maxTradesToCap, titTradesBeforeMax);
+        }
+        return maxTradesToCap;
+    }
+
+    function executeTrades(){
+        var mpCost = kg.diplomacy.getManpowerCost();
+        var goldCost = kg.diplomacy.getGoldCost();
+        var basePrices = [{
+            name: "gold",
+            val: goldCost
+        }, {
+            name: "manpower",
+            val: mpCost
+        }];
+
+        var plannedTrades = Object.keys(plan).filter(planItem => planItem.startsWith("Trade"));
+        shuffle(plannedTrades);
+        for(tradeable of plannedTrades) {
             const desiredTrades = (plan[tradeable] || 0);
             const executedTrades = (executedPlan[tradeable] || 0);
             const desiredRemainingTrades = desiredTrades - executedTrades;
@@ -1385,15 +1470,20 @@ window.nineSouls = function() {
                 tradeLog.log("No more trades desired with %s (planned %f executed %i)", raceName, desiredTrades.toFixed(1), executedTrades);
                 continue;
             }
+            var race = kg.diplomacy.get(raceName);
             //const race = kg.diplomacy.get(raceName);
-            var tradeBtn = kg.diplomacyTab.racePanels.find(rp => rp.race.name == raceName).tradeBtn
+            //var tradeBtn = kg.diplomacyTab.racePanels.find(rp => rp.race.name == raceName).tradeBtn
             //tradeLog.log(tradeBtn);
-            var tradesPossibleNow = Math.floor(canAffordHowManyNow(tradeBtn));
+            var tradesPossibleNow = Math.floor(canAffordHowManyNow({
+                model: {
+                    prices: [].concat(basePrices, race.buys)
+                }
+            }));
             if(tradesPossibleNow < 1){
                 tradeLog.log("No trades possible with %s right now", raceName);
                 continue;
             }
-            var tradesToPerform = Math.min(desiredRemainingTrades, tradesPossibleNow)
+            var tradesToPerform = Math.floor(Math.min(desiredRemainingTrades, tradesPossibleNow));
             if(tradesToPerform <= 0){
                 tradeLog.log("I don't even know how I'd end up in this branch!?");
                 continue;
@@ -1402,41 +1492,14 @@ window.nineSouls = function() {
                 var prevLeader = doLeaderChangeTrait("merchant");
                 tradeLog.log("Changed leader to trade previous ", prevLeader, " now ", kg.village.leader);
             }
-            for(tn = 0; tn < tradesToPerform; tn++){
-                // Good to free up capacity (looking at you sharks)
-                tradeLog.log("Executing crafts");
-                executeCrafts();
-                //var preTradeRes = copyCurrentResources();
-                //kg.diplomacy.trade(race);
-                tradeLog.log("Executing trade with %s", raceName);
-                tradeBtn.buttonContent.click();
-                //var postTradeRes = copyCurrentResources();
-                //var diff = diffResources(preTradeRes, postTradeRes);
-                // tradeLog.log(diff);
-                // var tradeResult = {
-                //     race: raceName,
-                //     time: new Date(),
-                //     resourceChange: diff
-                // };
-                // tradeLog.log(tradeResult);
-                // historicTrades.push(tradeResult);
-            }
-            executeCrafts();
-            executedPlan[tradeable] = executedTrades + tradesToPerform
-            if(!civilServiceNotResearched()){
-                tradeLog.log("Resetting leader to ", prevLeader);
-                changeLeader(prevLeader);
-            }
+
+            var maxTra = maxTradesBatch(race);
+            tradesToPerform = Math.floor(Math.max(Math.min(tradesToPerform, maxTra), 1));
+            kg.diplomacy.tradeMultiple(race, tradesToPerform);
+
+            executedPlan[tradeable] = executedTrades + tradesToPerform;
         }
     }
-
-    // function validateTradeModel(race){
-    //     var expected = variableFromTrade(race, getBuyables(false));
-    //     var actual = {};
-    //     for(var t of tradeHistory.toArray()){
-    //         for(var res in t.)
-    //     }
-    // }
 
     //#endregion
 
@@ -1570,6 +1633,16 @@ window.nineSouls = function() {
             craftLog.log("additionalMaxCultureFromManuscript %f, utility %f", additionalMaxCultureFromManuscript.toFixed(1), utility.toFixed(4));
             return utility;
     }
+
+    // function executeCraftsFrom(resources){
+    //     var validCrafts = game.workshop.crafts.filter(c =>
+    //         c.prices.every(p =>
+    //             resources.indexOf(p.name) >= 0));
+    //     validCrafts.forEach(c => {
+
+    //     });
+    //     return validCrafts;
+    // }
 
     function executeCrafts(){
         const craftButtons = getCrafts();
@@ -2560,39 +2633,97 @@ window.nineSouls = function() {
 
     //#region Faith
 
-    function variableForTranscend(){
-        if(!kg.religionTab.visible ||
-        !kg.religionTab.transcendBtn ||
-        !kg.religionTab.transcendBtn.model.visible)
-            return null;
-
+    function getApocryphaResetBonusByTier(tTier){
+        var bonusRatio = 1.01;
+        // getApocryphaResetBonus religion.js ~line 1107
+        //100% Bonus per Transcendence Level
+        if (kg.religion.getRU("transcendence").on) {
+            bonusRatio *= Math.pow((1 + tTier), 2);
+        }
+        return (kg.religion.faith / 100000) * 0.1 * bonusRatio;
     }
 
-    function variableForAdoreGalaxy(){
-        if(!kg.religionTab.visible ||
-        !kg.religionTab.adoreBtn ||
-        !kg.religionTab.adoreBtn.model.visible)
-            return null;
-        // Ok Adore is a valid action.
-        const agVar = {
-            name: "AdoreTheGalaxy"
-        };
-        var worship = kg.religion.faith
-        var ttPlus1 = (kg.religion.getRU("transcendence").on ? kg.religion.transcendenceTier : 0) + 1;
-        var currFaithRatio = kg.religion.faithRatio;
-        var faithRatioIncrease = worship / 1000000 * ttPlus1 * ttPlus1 * 1.01;
-        var currApocBonus = kg.religion.getApocryphaBonus();
-        var newApocBonus = kg.getUnlimitedDR(currFaithRatio + faithRatioIncrease, 0.1) * 0.1;
-        var apocBonusIncrease = newApocBonus - currApocBonus;
+    function canTranscend (){
+        return kg.religionTab.visible &&
+            kg.religionTab.transcendBtn &&
+            kg.religionTab.transcendBtn.model.visible;
+    }
 
-        var currentSolRevBonus = calculateSolarRevolutionRatio(worship);
-        var currentSolRevUtility = currentSolRevBonus * 100 * globalProductionUtility;
+    // How many times should I transcend before adoring (if I was to adore right now)
+    function shouldTranscendBeforeAdore(){
+        // Is transcend even a valid action?
+        if(!canTranscend()){
+            return 0;
+        }
+
+        var transcendTotalPriceCurrent = kg.religion._getTranscendTotalPrice(kg.religion.transcendenceTier);
+        var apocBonusNow = getApocryphaResetBonusByTier(kg.religion.transcendenceTier);
+        var timesToTranscend = 1;
+        while(true) {
+            var newTranTier = kg.religion.transcendenceTier + timesToTranscend;
+            var transcendPriceInFaithRatio = kg.religion._getTranscendTotalPrice(newTranTier) - transcendTotalPriceCurrent;
+
+            if(transcendPriceInFaithRatio > kg.religion.faithRatio){
+                // Can't afford transcend to yet another level.
+                return timesToTranscend - 1;
+            }
+
+            var apocBonusAfter = getApocryphaResetBonusByTier(newTranTier);
+            // transcend if we get our  "faithRatio" back immediately.
+            if (apocBonusAfter < apocBonusNow){
+                // Transcending again not beneficial.
+                return timesToTranscend - 1;
+            }
+            // Try another level.
+            timesToTranscend++;
+        }
+    }
+
+    function canAdore (){
+        return kg.religionTab.visible &&
+            kg.religionTab.adoreBtn &&
+            kg.religionTab.adoreBtn.model.visible;
+    }
+
+    function shouldIAdoreBeforePraise(){
+        if(!canAdore()){
+            return false;
+        }
+        // Is adore even a valid action?
+        // If I were to hypothetically adore I would transcend this many times to maximise it
+        var numTranscends = shouldTranscendBeforeAdore();
+        var newFaithRatio = getApocryphaResetBonusByTier(kg.religion.transcendenceTier + numTranscends);
+        var newApocBonusRatio = kg.getUnlimitedDR(newFaithRatio, 0.1) * 0.1;
+
+        var currentWorship = kg.religion.faith;
+        var worshipPerSecond = kg.calcResourcePerTick("faith", 0) * (1 + newApocBonusRatio);
+        var bankedWorship = game.resPool.get("faith").value * (1 + newApocBonusRatio);
+
+        var maxTimeToRestoreWorshipS = (currentWorship - bankedWorship) / worshipPerSecond;
+        var willingToWaitS = maxTimeToRecoverWorshipAfterAdoreHours * 60 * 60;
+        return maxTimeToRestoreWorshipS < willingToWaitS;
+    }
+
+    function executeTranscendsNow(){
+        if(canTranscend()){
+            var numTranscends = shouldTranscendBeforeAdore();
+            for(trNum = 0; trNum < numTranscends; trNum++){
+                kg.religion.transcend();
+            }
+        }
+    }
+
+    function executeAdoreNow(){
+        if(!canAdore()){
+            return;
+        }
+        executeTranscendsNow();
+        kg.religionTab.adoreBtn.buttonContent.click();
     }
 
     function variableForPraiseSun(){
         if(!kg.religionTab.visible)
             return null;
-        kg.religionTab.render();
         const halfFaith = kg.resPool.get("faith").maxValue / 2;
         const additionalWorship = halfFaith * (1 + kg.religion.getApocryphaBonus());
         // What a crumbily named variable :-(. Hysterical raisins I suppose.
@@ -2639,6 +2770,9 @@ window.nineSouls = function() {
         var praisesAvailable = faithAmount / halfFaith;
         //console.log("praiseToDo: %i, faithAmount: %i, halfFaith: %i, praisesAvailable: %i", praiseToDo, faithAmount, halfFaith, praisesAvailable);
         if(praisesAvailable > 1){
+            if(shouldIAdoreBeforePraise()){
+                executeAdoreNow();
+            }
             faithLog.info("About to paise %i ", praisesAvailable);
             kg.religionTab.praiseBtn.buttonContent.click();
             executedPlan.PraiseTheSun = (executedPlan.PraiseTheSun || 0) + praisesAvailable;
@@ -2755,6 +2889,7 @@ window.nineSouls = function() {
         // if(kg.spaceTab.visible){
         //     historyString +=
         // }
+        return historyString;
         logger.info(historyString);
     }
 
@@ -2922,11 +3057,8 @@ window.nineSouls = function() {
         if(timeLeftSecs <= 0)
         {
             execLog.warn("Goodbye cruel world!");
-            // Should always be true I think, but who knows - this code is hard to test ;-)
-            if(kg.religionTab.adoreBtn.model.visible){
-                kg.religion.praise();
-                kg.religionTab.adoreBtn.buttonContent.click();
-            }
+            kg.religion.praise();
+            executeAdoreNow();
             kg.reset();
             return;
         }
@@ -3003,6 +3135,7 @@ window.nineSouls = function() {
 
     var btnBegin;
     var planDisplay;
+    var historySpan;
     var modelDisplay;
 
     function addElement(parent, elementName, elementAttrs, innerText){
@@ -3035,16 +3168,37 @@ window.nineSouls = function() {
     function makeUi(){
         if(document.getElementById("9s"))
             return;
-        var scriptUi = addElement("game", "div", {id: "9s", style: "position: absolute; bottom: 0;"});
-        addElement(scriptUi, "span", {class: "gameTitle"}, "9-Souls: Kitten Auomation Engine");
-        addElement(scriptUi, "br");
+        var scriptBox = addElement("leftColumn", "div", {id: "9s"});
+        addElement(scriptBox, "style", {}, `
+.9s-ui {
+    display: flex;
+    font-size: 14px;
+}
+.9s-btn {
+    height: 30px;
+    width: 48.5px;
+}
+.9s-heading {
+
+}
+        `);
+        addElement(scriptBox, "h5", {class: "9s-heading"}, "9-Souls: Kitten Auomation Engine");
+        var scriptUi = addElement(scriptBox, "div", {class: "9s-ui"});
         btnBegin = addElement(scriptUi, "button", {id: "9s-startStop" }, "Go!");
         btnBegin.addEventListener("click", uiStopStart, true);
-        planDetails = addElement(scriptUi, "details", {id: "9s-plan"});
+        var planDetails = addElement(scriptUi, "details", {id: "9s-plan"});
         addElement(planDetails, "summary", null, "Current Plan:");
         planDisplay = addElement(planDetails, "ul");
 
         modelDisplay = addElement(scriptUi, "span", {id: "9s-model"});
+
+        var historyDiv = addElement("rightColumn", "div");
+        historySpan = addElement(historyDiv, "span", {id: "9s-history"});
+    }
+
+    function updateUi(){
+        updatePlanUi();
+        historySpan.innerText = recordHistory();
     }
 
     function updatePlanUi(){
@@ -3058,23 +3212,23 @@ window.nineSouls = function() {
     }
 
     function describePlanForUi(segmentedPlan, segmentedExecution){
-        return Object.keys(segmentedPlan).reduce((descString, planKey) => {
+        return Object.keys(segmentedPlan).sort().reduce((descString, planKey) => {
             descString += "<li>" + planKey;
             if(typeof segmentedPlan[planKey] === "object"){
-                descString += describePlanPart(segmentedPlan[planKey], segmentedExecution);
+                descString += describePlanPart(segmentedPlan[planKey], segmentedExecution[planKey]);
             } else {
-                descString += segmentedPlan[planKey];
+                descString += ":" + segmentedPlan[planKey].toFixed(2);
             }
             descString += "</li>";
             return descString;
         }, "");
     }
 
-    function describePlanPart(planPart, segmentedExecution){
-        return Object.keys(planPart).reduce((descString, planPartKey) => {
+    function describePlanPart(planPart, segmentedExecutionPart){
+        return Object.keys(planPart).sort().reduce((descString, planPartKey) => {
             descString += "<li>" + planPartKey + ":" + planPart[planPartKey].toFixed(2);
-            if(segmentedExecution[planPart] && segmentedExecution[planPart][planPartKey]){
-                descString += "(" + segmentedExecution[planPart][planPartKey] + ")"
+            if(segmentedExecutionPart && segmentedExecutionPart[planPartKey]){
+                descString += " (" + segmentedExecutionPart[planPartKey] + ")"
             }
             return descString + "</li>";
         }, "<ul>") + "</ul>";
@@ -3098,13 +3252,20 @@ window.nineSouls = function() {
         includeLoglevel: includeLoglevel,
         includeSolver: includeSolver,
         recordHistory: recordHistory,
-        makeUi: makeUi
+        makeUi: makeUi,
+
+        currentPlan: function () { return plan },
+        currentModel: function () { return model },
+        executedPlan: executedPlan,
+        segmentPlan: segmentPlan,
+
+        expectedResourceGain: expectedResourceGain
     };
 }();
 
 if(!GM_addElement) {
     // Loaded from console like the old days. Include the scripts that tamper monkey "requires".
-    window.nineSouls.includeLoglevel();
-    window.nineSouls.includeSolver();
+    unsafeWindow.nineSouls.includeLoglevel();
+    unsafeWindow.nineSouls.includeSolver();
 }
-window.nineSouls.makeUi();
+unsafeWindow.nineSouls.makeUi();

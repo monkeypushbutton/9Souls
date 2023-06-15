@@ -11,6 +11,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_addElement
+// @grant        GM_xmlhttpRequest
+// @connect      poetrydb.org
 // @sandbox      JavaScript
 // @require      https://unpkg.com/javascript-lp-solver@0.4.24/prod/solver.js
 // @require      https://raw.githubusercontent.com/joshfire/woodman/master/dist/woodman.js
@@ -39,10 +41,17 @@
 // Some code for selling exists, but it's a bit buggy.
 // TODO: Script doesn't calculate the coal penalty for steamworks correctly. It effects geologists as well as fixed production.
 // Script therefore generally overestimates amount of steel it can produce for example.
+// TODO: Cleanup and systemitise buidlding functions.
+// Building utilities should be inferrable form the description and game knowledge. Not using ad-hoc hardcoding as main way of applying utility tweaks.
+// E.g. for resource producers look at how easy it is to generate said resource and factor that in.
+// Already have storage utility, but applied inconsistently right now,
+// Allow baseUtilityMap to do an array of functions?
+// blah blah blah. Trying to get program to work on starcharts / unobtanium is making me mad.
 
 // I'd like to but it interferes with external libraries when plonking script in console.
 //"use strict";
 var GM_addElement;
+var GM_xmlhttpRequest;
 var unsafeWindow;
 // Allow script to be loaded outside Tampermonkey.
 if(!GM_addElement) {
@@ -205,6 +214,7 @@ unsafeWindow.nineSouls = function() {
             stopLoop('gatherHandle');
         }
         else {
+            nineSouls.bePoetic("harvest");
             restartGatherLoop();
         }
     }
@@ -293,6 +303,7 @@ unsafeWindow.nineSouls = function() {
 
     function observeTheSky(){
         if(kg.calendar.observeBtn){
+            nineSouls.bePoetic("new star");
             execLog.log("Observing...");
             kg.calendar.observeBtn.click();
         }
@@ -498,6 +509,7 @@ unsafeWindow.nineSouls = function() {
         var festVariable = variableForFestival();
         if(festVariable){
             model.variables[festVariable.name] = festVariable;
+            model.constraints.festivalCap = 1;
         }
         if(kg.science.get("electricity").researched){
             model.constraints.energy = {max: 0 - nondispatchableEnergyConsumption()}
@@ -539,6 +551,7 @@ unsafeWindow.nineSouls = function() {
 
     function upgradeButton(btn){
         kg.msg('9Souls: Upgrading ' + buttonLabel(btn));
+        bePoetic("upgrade");
         if(btn.model.showSellLink){
             var sellLink = btn.sellHref.link;
             var number = btn.model.metadata.val;
@@ -601,13 +614,29 @@ unsafeWindow.nineSouls = function() {
         // console.time("bldTab.render");
         // gamePage.bldTab.render();
         // console.timeEnd("bldTab.render");
-        buyable = kg.bldTab.children.slice(2).filter(b =>
+        var buyable = kg.bldTab.children.slice(2).filter(b =>
             isFeasible(b) == feasible && (
                 !planningForResetSince ||
                 b.model.metadata.effects.maxKittens ||
                 kg.bldTab.bldGroups.find(bg => bg.group.name == "storage").group.buildings.find(build => build == buttonId(b))
             )
         );
+        if(kg.spaceTab.visible){
+            if(!planningForResetSince){
+                buyable = buyable.concat(kg.spaceTab.GCPanel.children.filter(btn =>
+                    btn.model.visible &&
+                    (btn.model.metadata.val == 0 || !btn.model.metadata.noStackable) &&
+                    isFeasible(btn) == feasible));
+            }
+            buyable = buyable.concat(
+                kg.spaceTab.planetPanels
+                    .flatMap(pp => pp.children)
+                    .filter(btn =>
+                        btn.model.visible
+                        && isFeasible(btn) == feasible
+                        && (!planningForResetSince || btn.model.metadata.effects.maxKittens))
+            );
+        }
 
         if(planningForResetSince)
             return buyable;
@@ -636,14 +665,10 @@ unsafeWindow.nineSouls = function() {
                 buyable = buyable.concat(kg.religionTab.zgUpgradeButtons.filter(zu => zu.model.visible && isFeasible(zu) == feasible))
             }
         }
-        if(kg.spaceTab.visible){
-            buyable = buyable.concat(kg.spaceTab.GCPanel.children.filter(btn =>
-                btn.model.visible &&
-                (btn.model.metadata.val == 0 || !btn.model.metadata.noStackable) &&
-                isFeasible(btn) == feasible));
-            for(var panel of kg.spaceTab.planetPanels){
-                buyable = buyable.concat(panel.children.filter(btn => btn.model.visible && isFeasible(btn) == feasible));
-            }
+        if(kg.libraryTab.metaphysicsPanel.visible){
+            buyable = buyable.concat(
+                kg.libraryTab.metaphysicsPanel.children.filter(mp => mp.model.visible)
+            );
         }
         buyable = buyable.concat(secretUnlocks());
         //console.timeEnd("getBuyables");
@@ -751,7 +776,9 @@ unsafeWindow.nineSouls = function() {
         sattelite: (btn) => firstTimesTheCharm(btn, 3),
         spaceElevator: 4,
         spaceStation: 2,
-
+        // Redmoon
+        moonOutpost: (btn) => firstTimesTheCharm(btn, 2),
+        moonBase: 0.3
 
         //faithTab: [faithUtility, ]
     };
@@ -759,6 +786,17 @@ unsafeWindow.nineSouls = function() {
     function isPolicy(btn){
         const btnId = (typeof btn == 'object') ? buttonId(btn) : btn;
         return kg.science.policies.find(p => p.name == btnId)
+    }
+
+    function isMetaphysics(btn){
+        const btnId = buttonId(btn);
+        if(btnId == "Burn your paragon"){
+            return true;
+        }
+        if(game.prestige.perks.find(p => p.name == btnId)){
+            return true;
+        }
+        return false;
     }
 
     // Bonus for buildings where the first is important.
@@ -770,6 +808,44 @@ unsafeWindow.nineSouls = function() {
             return base;
         }
         return btn.model.metadata.val == 0 ? 2.5 : 1;
+    }
+
+    // prestige.js getParagonProductionRatio 501
+    function getParagonProductionRatio(paragon, burnedParagon){
+        var paragonRatio = kg.prestige.getParagonRatio();
+
+        var productionRatioParagon = (paragon * 0.010) * paragonRatio;
+        productionRatioParagon = kg.getLimitedDR(productionRatioParagon, 2 * paragonRatio);
+
+        var ratio = kg.calendar.darkFutureYears() >= 0 ? 4 : 1;
+        var productionRatioBurnedParagon = burnedParagon * 0.010 * paragonRatio;
+        productionRatioBurnedParagon = kg.getLimitedDR(productionRatioBurnedParagon, ratio * paragonRatio);
+
+        return productionRatioParagon + productionRatioBurnedParagon;
+    }
+
+    function globalProdParagonProductionCost(btn){
+        var para = paragonCost(btn);
+        if(para == 0){
+            return 0;
+        }
+        var paragonNow = game.resPool.get("paragon").value;
+        var burnedParagonNow = game.resPool.get("paragon").value;
+        var productionBonusNow = getParagonProductionRatio(paragonNow, burnedParagonNow);
+
+        var paragonAfter = paragonNow - para;
+        var burnedParagonAfter = burnedParagonNow + (buttonId(btn) == "Burn your paragon" ? para : 0);
+        var productionBonusAfter = getParagonProductionRatio(paragonAfter, burnedParagonAfter);
+        return productionBonusNow - productionBonusAfter;
+    }
+
+    function paragonCost(btn){
+        if(!isMetaphysics(btn)){
+            return 0;
+        }
+        if(buttonId(btn) == "Burn your paragon")
+            return game.resPool.get("paragon").value;
+        return btn.model.prices.find(p => p.name == "paragon").val;
     }
 
     function buttonUtility(btn, outOfReach = null){
@@ -793,21 +869,21 @@ unsafeWindow.nineSouls = function() {
                 default:
                     buyableLog.warn("Too many arguments for utility function!");
             }
-        }
-        else if (!(mappedUtility === undefined)) {
+        } else if (!(mappedUtility === undefined)) {
             utility = mappedUtility;
-        }
-
-        else if(isFaithButton(btn))
+        } else if(isFaithButton(btn)){
             utility = faithUtility;
-        else if(isScienceButton(btn))
+        } else if(isScienceButton(btn)){
             utility = scienceUtility;
-        else if(isWorkshopButton(btn))
+        } else if(isWorkshopButton(btn)){
             utility = workshopUtility;
-        else if (isPolicy(btn))
+        } else if (isPolicy(btn)) {
             utility = policyUtility;
-        else if (isGcButton(btn))
+        } else if (isGcButton(btn)) {
             utility = spaceGcUtility;
+        } else if (isMetaphysics(btn)) {
+            utility = 25 - (globalProdParagonProductionCost(btn) * globalProductionUtility * 100);
+        }
         // Embassies have diminishing returns.
         else if(btn.race){
             utility = embassyUtility;
@@ -976,6 +1052,7 @@ unsafeWindow.nineSouls = function() {
             buyButton = buyButtons[0];
             if(canAffordNow(buyButton)){
                 var prevLeader = switchLeaderToBuy(buyButton);
+                bePoetic(label);
                 buyableLog.info('Buying ' + label);
                 kg.msg('9Souls: Buying ' + buttonLabel(buyButton));
                 executedPlan[buyable] = 1;
@@ -1064,7 +1141,8 @@ unsafeWindow.nineSouls = function() {
             manpower: 1500,
             culture: 5000,
             parchment: 2500,
-            utility: happinessUtility * 3
+            utility: happinessUtility * 3,
+            festivalCap: 1
         };
     }
 
@@ -1079,6 +1157,7 @@ unsafeWindow.nineSouls = function() {
         }
         var doFest = kg.villageTab.festivalBtn;
         if(canAffordNow(doFest)){
+            bePoetic("festival");
             execLog.log("P A R T Y Wooop Woop!");
             doFest.buttonContent.click();
             executedPlan.Festival = 1;
@@ -1495,6 +1574,7 @@ unsafeWindow.nineSouls = function() {
 
             var maxTra = maxTradesBatch(race);
             tradesToPerform = Math.floor(Math.max(Math.min(tradesToPerform, maxTra), 1));
+            bePoetic(raceName);
             kg.diplomacy.tradeMultiple(race, tradesToPerform);
 
             executedPlan[tradeable] = executedTrades + tradesToPerform;
@@ -1673,6 +1753,7 @@ unsafeWindow.nineSouls = function() {
 
             switchLeaderToCraft(craftName);
             craftLog.log("Crafting %i %s (%i/%f)", numToActuallyCraft, craftName, alreadyDone + numToActuallyCraft, plan[craftable].toFixed(2))
+            bePoetic(craftName);
             executedPlan[craftable] = alreadyDone + numToActuallyCraft;
             kg.workshop.craft(craftName, numToActuallyCraft)
         }
@@ -1730,6 +1811,8 @@ unsafeWindow.nineSouls = function() {
 
         var btn = kg.diplomacyTab.exploreBtn
         if(canAffordNow(kg.diplomacyTab.exploreBtn)){
+
+            bePoetic("explore");
             kg.msg('9Souls: To seek out new life and new civilizations...');
             btn.buttonContent.click();
             executedPlan.Explore = 1;
@@ -1819,6 +1902,8 @@ unsafeWindow.nineSouls = function() {
             return;
         huntsToPerform = Math.min(desiredRemainingHunts, possibleHuntsNow)
         craftLog.log("Hunting ", huntsToPerform, huntsToPerform == possibleHuntsNow ? "  (as many as possible)" : ""," times (", executedHunts + huntsToPerform, "/", desiredHunts ,")")
+
+        bePoetic("hunt");
         if(huntsToPerform == possibleHuntsNow){
             kg.village.huntAll()
         } else {
@@ -2035,6 +2120,7 @@ unsafeWindow.nineSouls = function() {
     //#endregion
 
     //#region Simulate Production
+
     function copyCurrentResources(){
         return kg.resPool.resources.map(r => {return {resource: r.name, value: r.value}});
     }
@@ -2502,6 +2588,7 @@ unsafeWindow.nineSouls = function() {
         var expToPromote = kg.village.sim.expToPromote(highRank.rank, highRank.rank + 1, highRank.exp);
         var goldToPromote = kg.village.sim.goldToPromote(highRank.rank, highRank.rank + 1, kg.resPool.get("gold").value);
         if (expToPromote[0] && goldToPromote[0]) {
+            bePoetic("promotion");
             execLog.info("Congrats to %s %s who was promoted from rank %i to %i", highRank.name, highRank.surname, highRank.rank, highRank.rank + 1)
             kg.village.sim.promote(highRank);
             executedPlan.PromoteLeader = 1;
@@ -2520,13 +2607,13 @@ unsafeWindow.nineSouls = function() {
         return null;
     }
 
-    function desiredTraitToBuy(btn){
-        if(btn.model.prices.find(p => p.name == "faith"))
-            return "wise";
-        else if (btn.tab && (btn.tab.tabId == "Science" || btn.tab.tabId == "Workshop"))
-            return "scientist";
-        return null;
-    }
+    // function desiredTraitToBuy(btn){
+    //     if(btn.model.prices.find(p => p.name == "faith"))
+    //         return "wise";
+    //     else if (btn.tab && (btn.tab.tabId == "Science" || btn.tab.tabId == "Workshop"))
+    //         return "scientist";
+    //     return null;
+    // }
 
     function canSwapLeaderToPurchase(btn, feasibilityStudy = true){
         var limitingFactors = limitedResources(btn);
@@ -2708,6 +2795,7 @@ unsafeWindow.nineSouls = function() {
         if(canTranscend()){
             var numTranscends = shouldTranscendBeforeAdore();
             for(trNum = 0; trNum < numTranscends; trNum++){
+                bePoetic("transcend");
                 kg.religion.transcend();
             }
         }
@@ -2718,6 +2806,7 @@ unsafeWindow.nineSouls = function() {
             return;
         }
         executeTranscendsNow();
+        bePoetic("adore");
         kg.religionTab.adoreBtn.buttonContent.click();
     }
 
@@ -2774,6 +2863,7 @@ unsafeWindow.nineSouls = function() {
                 executeAdoreNow();
             }
             faithLog.info("About to paise %i ", praisesAvailable);
+            bePoetic("praise");
             kg.religionTab.praiseBtn.buttonContent.click();
             executedPlan.PraiseTheSun = (executedPlan.PraiseTheSun || 0) + praisesAvailable;
         }
@@ -2808,8 +2898,10 @@ unsafeWindow.nineSouls = function() {
         var sacsDesired = plannedSac - executedSacs;
         var sacsPossible = Math.floor(kg.resPool.get("unicorns").value / 2500.0);
         var sacsToDo = Math.min(sacsPossible, sacsDesired)
-        if(sacsToDo <= 0)
+        if(sacsToDo <= 0){
             return;
+        }
+        bePoetic("unicorn");
         for(var i = 0; i < sacsToDo; i++){
             faithLog.info("I will bathe in unicorn tears!");
             kg.religionTab.sacrificeBtn.buttonContent.click()
@@ -3044,6 +3136,9 @@ unsafeWindow.nineSouls = function() {
                 planningForResetSince = new Date();
             }
         }
+        if(planningForResetSince){
+            bePoetic("the end of the world");
+        }
         return planningForResetSince;
     }
 
@@ -3063,6 +3158,11 @@ unsafeWindow.nineSouls = function() {
             return;
         }
 
+        const reminderPointSeconds = [1200, 600, 300, 240, 180, 120, 60, 30];
+        var uiReminder = reminderPointSeconds.find(rp => timeLeftSecs <= rp && (timeLeftSecs + executeIntervalSeconds > rp));
+        if(uiReminder) {
+            timeLeftSecs = uiReminder;
+        }
         var diffMins = Math.floor(timeLeftSecs / 60);
         var diffSeconds = Math.floor(timeLeftSecs - (diffMins * 60));
         if(diffMins)
@@ -3071,11 +3171,124 @@ unsafeWindow.nineSouls = function() {
             diffSeconds = " " + diffSeconds + " seconds"
         else
             diffSeconds = ""
-        execLog.warn("THE END IS NIGH. Reset incoming in approximately %s%s.", diffMins, diffSeconds);
+        var msg = "THE END IS NIGH. Reset in approximately " + diffMins + diffSeconds
+        execLog.warn(msg);
+        if(uiReminder){
+            kg.msg("9Souls: " + msg);
+        }
     }
 
     function addMinutes(date, minutes) {
         return new Date(date.getTime() + minutes*60000);
+    }
+
+    function writePoetry(poetryResponse, searchTerm){
+        console.log(poetryResponse);
+        // Bad / no data. Meh.
+        if(poetryResponse.status != 200 ||
+            !poetryResponse.response ||
+            !poetryResponse.response.length
+            ){
+            return;
+        }
+        var poemData = poetryResponse.response[0];
+        var context = findContext(poemData.lines, searchTerm);
+        // Meh.
+        if(!context){
+            return;
+        }
+        nextWritePoetry = addMinutes(new Date(), 2);
+        context.reverse().forEach(l => kg.msg("    " + l, null, "9souls", true));
+        kg.msg("9Souls: " + poemData.title + " by " + poemData.author, null, "9souls");
+    }
+
+    var poetryRecited = new CircularBuffer(15);
+    var nextWritePoetry = null;
+
+    function bePoetic(searchTerm){
+        if(!GM_xmlhttpRequest){
+            return;
+        }
+        if(poetryRecited.toArray().includes(searchTerm)){
+            return;
+        }
+        if(nextWritePoetry && nextWritePoetry > new Date()){
+            // Don't spam - this is just for fun after all.
+            return;
+        }
+        poetryRecited.push(searchTerm);
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: "https://poetrydb.org/lines,random/" + searchTerm + ";1",
+            nocache: true,
+            responseType: "json",
+            onload: response => writePoetry(response, searchTerm)
+        });
+    }
+
+    function findContext(poemLines, context){
+        var lineIdx = poemLines.findIndex(l => l.includes(context));
+        if(lineIdx < 0)
+            return null;
+        var contextStartLine = lineIdx;
+        var contextStart = poemLines[lineIdx].indexOf(context);
+        var contextEndLine = lineIdx;
+        var contextEndChar = contextStart;
+        while (true) {
+            var endCtxChar = indexOfAny([".", "?", "!"], poemLines[contextEndLine], contextEndLine == lineIdx ? contextStart : 0);
+            if(endCtxChar > -1){
+                contextEndChar = endCtxChar;
+                break;
+            } else {
+                contextEndChar = poemLines[contextEndLine].length
+            }
+            if(contextEndLine >= lineIdx + 2) {
+                break;
+            }
+            contextEndLine++;
+        }
+        while(true){
+            var startCtxChar = lastIndexOfAny([".", "?", "!"], poemLines[contextStartLine], contextStartLine == lineIdx ? contextStart : -1);
+            if(startCtxChar > -1){
+                contextStart = startCtxChar;
+                break;
+            } else {
+                contextStart = -1;
+            }
+            if(contextStartLine == 0 || contextStartLine <= lineIdx - 2) {
+                break;
+            }
+            contextStartLine--;
+        }
+        console.log(contextStartLine, contextStart)
+        console.log(contextEndLine, contextEndChar)
+        var lines = poemLines.slice(contextStartLine, contextEndLine + 1);
+        lines[0] = lines[0].slice(contextStart + 1);
+        lines[lines.length - 1] = lines[lines.length - 1].slice(0, contextEndChar);
+        return lines;
+    }
+
+    function lastIndexOfAny(needles, haystack, searchBefore = -1){
+        if(searchBefore != -1){
+            haystack = haystack.slice(0, searchBefore);
+        }
+        return needles.reduce((prev, needle) => {
+            var idx = haystack.lastIndexOf(needle);
+            if(idx > prev){
+                return idx;
+            }
+            return prev;
+        }, -1);
+    }
+
+    function indexOfAny(needles, haystack, startAt = 0){
+        return needles.reduce((prev, needle) => {
+            var idx = haystack.indexOf(needle, startAt);
+            if(idx >= 0 && (idx < prev || prev == -1)){
+                return idx;
+            }
+            return prev;
+        }, -1);
     }
 
     //#endregion
@@ -3190,7 +3403,9 @@ unsafeWindow.nineSouls = function() {
         addElement(planDetails, "summary", null, "Current Plan:");
         planDisplay = addElement(planDetails, "ul");
 
-        modelDisplay = addElement(scriptUi, "span", {id: "9s-model"});
+        var modelDetails = addElement(scriptUi, "details", {id: "9s-model"});
+        addElement(modelDetails, "summary", null, "Current Model:");
+        modelDisplay = addElement(modelDetails, "ul");
 
         var historyDiv = addElement("rightColumn", "div");
         historySpan = addElement(historyDiv, "span", {id: "9s-history"});
@@ -3198,7 +3413,12 @@ unsafeWindow.nineSouls = function() {
 
     function updateUi(){
         updatePlanUi();
+        updateModelUi();
         historySpan.innerText = recordHistory();
+    }
+
+    function updateModelUi(){
+
     }
 
     function updatePlanUi(){
@@ -3259,7 +3479,9 @@ unsafeWindow.nineSouls = function() {
         executedPlan: executedPlan,
         segmentPlan: segmentPlan,
 
-        expectedResourceGain: expectedResourceGain
+        baseUtilityMap: baseUtilityMap,
+
+        bePoetic: bePoetic
     };
 }();
 

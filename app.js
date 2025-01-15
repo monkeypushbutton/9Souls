@@ -253,6 +253,7 @@ unsafeWindow.nineSouls = function() {
         if(kg.calendar.season != plannedSeason){
             var statusHist = GM_getValue("9SoulsStatusHistory", []);
             statusHist.push(recordHistory());
+            // ejslint-disable-next-line expected_a_before_b
             GM_setValue("9SoulsStatusHistory", statusHist);
             execLog.log("Replanning (season)");
             planNow();
@@ -527,13 +528,13 @@ unsafeWindow.nineSouls = function() {
     }
 
     function segmentPlan(p = plan){
-        var sp = {};
-        var notCopied = ["bounded", "feasible", "isIntegral", "result"];
-        for(var f in p){
+        const sp = {};
+        const notCopied = ["bounded", "feasible", "isIntegral", "result"];
+        for(const f in p){
             if(notCopied.find(nc => nc == f)){
                 continue;
             }
-            var parts = f.split("|");
+            const parts = f.split("|");
             if(parts.length == 1){
                 sp[f] = p[f];
             } else {
@@ -547,16 +548,14 @@ unsafeWindow.nineSouls = function() {
     }
 
     function segmentModel(m = model){
-        if(!m) {
-            return {};
-        }
+        if(!m) { return {}; }
         var segModel = {
             variables: nineSouls.segmentPlan(m.variables),
             constraints: {}
         }
-        convert(m.constraints).filter(c => c.value.max != 0).forEach(c =>
-            segModel.constraints[c.name] = c.value
-        );
+        convert(m.constraints)
+            .filter(c => c.value.max != 0)
+            .forEach(c => {segModel.constraints[c.name] = c.value});
         return segModel;
     }
 
@@ -663,8 +662,7 @@ unsafeWindow.nineSouls = function() {
             );
         }
 
-        if(planningForResetSince)
-            return buyable;
+        if(planningForResetSince) { return buyable; }
 
         if(kg.workshopTab.visible){
             // gamePage.workshopTab.render();
@@ -826,15 +824,15 @@ unsafeWindow.nineSouls = function() {
         solarRevolution: 12,
         apocripha: 12,
         transcendence: 13,
-		// Unicorns calculated by using Kittens Game Calculator
-		// And weighting appropriately
-		// Adjusting for rare resources, given unicornPasture = 1
+        // Unicorns calculated by using Kittens Game Calculator
+        // And weighting appropriately
+        // Adjusting for rare resources, given unicornPasture = 1
         unicornTomb: 0.02,
         ivoryTower: 0.13,
         ivoryCitadel: 0.12,
         skyPalace: 0.23,
-		unicornUtopia: 1.16,
-		sunspire: 2.33,
+        unicornUtopia: 1.16,
+        sunspire: 2.33,
 
         // Bonfire
         // Nip production is ass outside the very early game.
@@ -1097,8 +1095,7 @@ unsafeWindow.nineSouls = function() {
                     var capIncrease = (effects[resource.name + "Max"] || 0) * currentRatioEffect;
                     capIncrease *= 1 + kg.prestige.getParagonStorageRatio();
                     const capIncreaseRatio = effects[resource.name + "MaxRatio"] || 0;
-                    if(!capIncrease && !capIncreaseRatio)
-                        continue;
+                    if(!capIncrease && !capIncreaseRatio) { continue; }
                     if(capIncreaseRatio){
                         var maxWithNoRatioEffect = resource.maxValue / currentRatioEffect;
                         var capWithOneRatioEffect = maxWithNoRatioEffect * (1 + capIncreaseRatio);
@@ -1486,30 +1483,30 @@ unsafeWindow.nineSouls = function() {
     function expectedResourceGain(tradeRace, sellResource){
         if(tradeRace.name == "zebras" && sellResource == "titanium"){
             //-------------- 15% + 0.35% chance per ship to get titanium ---------------
-            var shipAmount = kg.resPool.get("ship").value;
-            var zebraRelationModifierTitanium = kg.getEffect("zebraRelationModifier") * kg.bld.getBuildingExt("tradepost").meta.effects.tradeRatio;
+            const shipAmount = kg.resPool.get("ship").value;
+            const zebraRelationModifierTitanium = kg.getEffect("zebraRelationModifier") * kg.bld.getBuildingExt("tradepost").meta.effects.tradeRatio;
             return (1.5 + shipAmount * 0.03) * (1 + zebraRelationModifierTitanium) * ((0.15 + shipAmount * 0.0035) / 2);
         }
-        var bonusForLeaderSwitch = tradeBonusForLeaderSwitch();
-        var standingRatio = kg.getEffect("standingRatio") + kg.diplomacy.calculateStandingFromPolicies(tradeRace.name, kg);
-        var failureChance = tradeRace.standing < 0 ? -(tradeRace.standing + standingRatio) / 2 : 0;
-        var bonusTradeChance = tradeRace.standing > 0 ? tradeRace.standing + standingRatio / 2 : 0;
-        var tradeRatio = 1 + bonusForLeaderSwitch + kg.diplomacy.getTradeRatio() + kg.diplomacy.calculateTradeBonusFromPolicies(tradeRace.name, kg) + kg.challenges.getChallenge("pacifism").getTradeBonusEffect(kg);
-        var raceRatio = 1 + tradeRace.energy * 0.02;
-        var currentSeason = kg.calendar.getCurSeason().name;
-        var embassyEffect = kg.ironWill ? 0.0025 : 0.01;
+        const bonusForLeaderSwitch = tradeBonusForLeaderSwitch();
+        const standingRatio = kg.getEffect("standingRatio") + kg.diplomacy.calculateStandingFromPolicies(tradeRace.name, kg);
+        const failureChance = tradeRace.standing < 0 ? -(tradeRace.standing + standingRatio) / 2 : 0;
+        const bonusTradeChance = tradeRace.standing > 0 ? tradeRace.standing + standingRatio / 2 : 0;
+        const tradeRatio = 1 + bonusForLeaderSwitch + kg.diplomacy.getTradeRatio() + kg.diplomacy.calculateTradeBonusFromPolicies(tradeRace.name, kg) + kg.challenges.getChallenge("pacifism").getTradeBonusEffect(kg);
+        const raceRatio = 1 + tradeRace.energy * 0.02;
+        const currentSeason = kg.calendar.getCurSeason().name;
+        const embassyEffect = kg.ironWill ? 0.0025 : 0.01;
 
         if (!kg.diplomacy.isValidTrade(sellResource, tradeRace)) {
             return 0;
         }
-        var tradeChance = sellResource.chance *
+        const tradeChance = sellResource.chance *
             (1 + (
                 tradeRace.embassyPrices ?
                 kg.getLimitedDR(tradeRace.embassyLevel * embassyEffect, 0.75) :
                 0)
             );
-        var resourceSeasonTradeRatio = 1 + (sellResource.seasons ? sellResource.seasons[currentSeason] : 0);
-        expected =
+        const resourceSeasonTradeRatio = 1 + (sellResource.seasons ? sellResource.seasons[currentSeason] : 0);
+        const expected =
             // Basic amount specified
             sellResource.value
             // Trades for hostile races may fail completely
@@ -1528,23 +1525,22 @@ unsafeWindow.nineSouls = function() {
     }
 
     function variableFromTrade(tradeRace, outOfReach) {
-        var tv = {
+        const tv = {
             name: "Trade|" + buttonId(tradeRace),
             manpower: kg.diplomacy.getManpowerCost(),
             gold: kg.diplomacy.getGoldCost(),
             blueprint: -0.1
         };
-        for(res of tradeRace.buys){
+        for(const res of tradeRace.buys){
             tv[res.name] = res.val;
         }
 
-        var tradeUtility = 0;
+        let tradeUtility = 0;
         for(const sellResource of tradeRace.sells){
             //console.debug(res, tradeRace, res.minLevel, tradeRace.embassyLevel)
             // Mostly cribbed from diplomacy.tradeImpl
-            var expected = expectedResourceGain(tradeRace, sellResource);
-            if(!expected)
-                continue;
+            let expected = expectedResourceGain(tradeRace, sellResource);
+            if(!expected) { continue; }
             //console.debug(sellResource.value, failureChance, bonusTradeChance, tradeChance, tradeRatio, raceRatio, resourceSeasonTradeRatio)
             //console.debug(expected)
 
@@ -1554,8 +1550,8 @@ unsafeWindow.nineSouls = function() {
     //~~----___  (_o_-~
     '           |/'
             */
-            var sellResPoolRes = kg.resPool.get(sellResource.name);
-            reserved = sellResPoolRes.name == "catnip" ? reservedNipAmount() : 0;
+            const sellResPoolRes = kg.resPool.get(sellResource.name);
+            const reserved = sellResPoolRes.name == "catnip" ? reservedNipAmount() : 0;
             if(sellResPoolRes.maxValue){
                 expected = Math.min(expected, sellResPoolRes.maxValue - reserved);
             }
@@ -1570,15 +1566,15 @@ unsafeWindow.nineSouls = function() {
 
             tv[sellResource.name] = -expected
         }
-        var embassyEffect = kg.ironWill ? 0.0025 : 0.01;
-        tv.spice = -0.35 * (1 + (tradeRace.embassyPrices ?  tradeRace.embassyLevel * embassyEffect : 0))
+        const embassyEffect = kg.ironWill ? 0.0025 : 0.01;
+        tv.spice = -0.35 * (1 + (tradeRace.embassyPrices ? tradeRace.embassyLevel * embassyEffect : 0))
         if (tradeRace.name == "zebras") {
             tv.titanium = -expectedResourceGain(tradeRace, "titanium");
         }
 
         // Trades can generate Spice, which is a luxury. Grant some utility for that if we are below some threshold.
-        var spiceRes = kg.resPool.get("spice");
-        var spiceCons = resoucePerTick(spiceRes);
+        const spiceRes = kg.resPool.get("spice");
+        const spiceCons = resoucePerTick(spiceRes);
         if(projectResourceAmount(spiceRes) < -1 * spiceCons * kg.ticksPerSecond * planHorizonSeconds()){
             tradeUtility += happinessUtility;
         }
@@ -1590,39 +1586,39 @@ unsafeWindow.nineSouls = function() {
 
     // Maximum number of trades to perform now such that we don't go over our resource caps.
     function maxTradesBatch(race){
-        var maxTradesToCap = Infinity;
-        for(sellResource of race.sells){
+        let maxTradesToCap = Infinity;
+        for(const sellResource of race.sells){
             //you must be this tall to trade this rare resource
             if (!kg.diplomacy.isValidTrade(sellResource, race)) {
                 continue;
             }
-            var res = kg.resPool.get(sellResource.name);
-            var cap = res.maxValue
+            const res = kg.resPool.get(sellResource.name);
+            const cap = res.maxValue
             if(!cap) {
                 continue;
             }
-            var capLessCurrent = cap - res.value;
-            var maxTradeAmt = expectedResourceGain(race, sellResource) * (1 + sellResource.width);
-            var tradesBeforeMax = capLessCurrent / maxTradeAmt;
+            const capLessCurrent = cap - res.value;
+            const maxTradeAmt = expectedResourceGain(race, sellResource) * (1 + sellResource.width);
+            const tradesBeforeMax = capLessCurrent / maxTradeAmt;
             maxTradesToCap = Math.min(maxTradesToCap, tradesBeforeMax);
         }
         if(race.name == "zebras"){
             // fuck you zebras
             // Multiplier is chosen out of thin air because I'm lazy.
             // Also hee hee titMaxGain.
-            var titMaxGain = expectedResourceGain(race, "titanium") * 1.5;
-            var res = kg.resPool.get("titanium");
-            var titCapLessCurrent = res.maxValue - res.value;
-            var titTradesBeforeMax = titCapLessCurrent / titMaxGain;
+            const titMaxGain = expectedResourceGain(race, "titanium") * 1.5;
+            const res = kg.resPool.get("titanium");
+            const titCapLessCurrent = res.maxValue - res.value;
+            const titTradesBeforeMax = titCapLessCurrent / titMaxGain;
             maxTradesToCap = Math.min(maxTradesToCap, titTradesBeforeMax);
         }
         return maxTradesToCap;
     }
 
     function executeTrades(){
-        var mpCost = kg.diplomacy.getManpowerCost();
-        var goldCost = kg.diplomacy.getGoldCost();
-        var basePrices = [{
+        const mpCost = kg.diplomacy.getManpowerCost();
+        const goldCost = kg.diplomacy.getGoldCost();
+        const basePrices = [{
             name: "gold",
             val: goldCost
         }, {
@@ -1630,9 +1626,9 @@ unsafeWindow.nineSouls = function() {
             val: mpCost
         }];
 
-        var plannedTrades = Object.keys(plan).filter(planItem => planItem.startsWith("Trade"));
+        const plannedTrades = Object.keys(plan).filter(planItem => planItem.startsWith("Trade"));
         shuffle(plannedTrades);
-        for(tradeable of plannedTrades) {
+        for(const tradeable of plannedTrades) {
             const desiredTrades = (plan[tradeable] || 0);
             const executedTrades = (executedPlan[tradeable] || 0);
             const desiredRemainingTrades = desiredTrades - executedTrades;
@@ -1641,11 +1637,11 @@ unsafeWindow.nineSouls = function() {
                 tradeLog.log("No more trades desired with %s (planned %f executed %i)", raceName, desiredTrades.toFixed(1), executedTrades);
                 continue;
             }
-            var race = kg.diplomacy.get(raceName);
+            const race = kg.diplomacy.get(raceName);
             //const race = kg.diplomacy.get(raceName);
             //var tradeBtn = kg.diplomacyTab.racePanels.find(rp => rp.race.name == raceName).tradeBtn
             //tradeLog.log(tradeBtn);
-            var tradesPossibleNow = Math.floor(canAffordHowManyNow({
+            const tradesPossibleNow = Math.floor(canAffordHowManyNow({
                 model: {
                     prices: [].concat(basePrices, race.buys)
                 }
@@ -1654,7 +1650,7 @@ unsafeWindow.nineSouls = function() {
                 tradeLog.log("No trades possible with %s right now", raceName);
                 continue;
             }
-            var tradesToPerform = Math.floor(Math.min(desiredRemainingTrades, tradesPossibleNow));
+            let tradesToPerform = Math.floor(Math.min(desiredRemainingTrades, tradesPossibleNow));
             if(tradesToPerform <= 0){
                 tradeLog.log("I don't even know how I'd end up in this branch!?");
                 continue;
@@ -1678,10 +1674,11 @@ unsafeWindow.nineSouls = function() {
     //#region Crafts
 
     function getCrafts(){
-        if(kg.workshopTab.visible)
+        if(kg.workshopTab.visible) {
             return kg.workshopTab.craftBtns.filter(b => b.model.visible && isFeasible(b));
-        else
+        } else {
             return [kg.bldTab.children.find(btn => btn.model.name == "Refine catnip")];
+        }
     }
 
     function craftAmountForResource(craft){
@@ -1689,15 +1686,15 @@ unsafeWindow.nineSouls = function() {
     }
 
     function variableFromCraft(c, outOfReach){
-        craft = c.craftName || 'wood'
-        cv = {
+        const craft = c.craftName || 'wood'
+        const cv = {
             name: "Craft|" + craft
         };
         var craftAmt = craftAmountForResource(craft);
         craftLog.log(craft + " craftAmt " + craftAmt)
         cv[craft] = -craftAmt;
         var craftPrices = kg.workshop.getCraftPrice(c.model);
-        for(price of craftPrices){
+        for(const price of craftPrices){
             cv[price.name] = price.val;
         }
         if(craft == "wood" && kg.bld.buildingsData.find(b => b.name == 'hut').val < 1){
@@ -1731,8 +1728,8 @@ unsafeWindow.nineSouls = function() {
                 // Buildings.js line ~850
                 //100% to 225% with slow falldown on the 75%
                 var limit = 2.25 + kg.getEffect("shipLimit") * kg.bld.get("reactor").on;
-                var ratioNow = 1 + kg.getLimitedDR(cargoShips.effects["harborRatio"] * builtAlready, limit);
-                var ratioAfterCraft = 1 + kg.getLimitedDR(cargoShips.effects["harborRatio"] * (builtAlready + craftAmt), limit);
+                var ratioNow = 1 + kg.getLimitedDR(cargoShips.effects.harborRatio * builtAlready, limit);
+                var ratioAfterCraft = 1 + kg.getLimitedDR(cargoShips.effects.harborRatio * (builtAlready + craftAmt), limit);
                 var ratioChange = ratioAfterCraft - ratioNow;
 
                 var shipStorageUtility = utilityForSorageCap("ship", outOfReach, {
@@ -1783,7 +1780,7 @@ unsafeWindow.nineSouls = function() {
         }
         if (kg.prestige.getPerk("codexLeviathanianus").researched) {
             var blackLibrary = kg.religion.getTU("blackLibrary");
-            var ttBoostRatio = 1 + blackLibrary.val * (blackLibrary.effects["compendiaTTBoostRatio"] + kg.getEffect("blackLibraryBonus"));
+            var ttBoostRatio = 1 + blackLibrary.val * (blackLibrary.effects.compendiaTTBoostRatio + kg.getEffect("blackLibraryBonus"));
             scienceMaxCap *= 1 + 0.05 * ttBoostRatio * kg.religion.transcendenceTier;
         }
         scienceMaxCap += kg.bld.getEffect("scienceMaxCompendia");
@@ -1794,8 +1791,8 @@ unsafeWindow.nineSouls = function() {
     }
 
     function compendiumUtility(outOfReach, craftPrices, craftAmt){
-        var scienceUtility = compendiumScienceUtility(outOfReach);
-        var manuscriptUtilityLost = manuscriptUtility(outOfReach) * craftPrices.find(cp => cp.name == "manuscript").val;
+        const scienceUtility = compendiumScienceUtility(outOfReach);
+        const manuscriptUtilityLost = manuscriptUtility(outOfReach) * craftPrices.find(cp => cp.name == "manuscript").val;
         craftLog.log("scienceUtility %f, manuscriptUtilityLost %f", scienceUtility.toFixed(4), manuscriptUtilityLost.toFixed(4));
         return (scienceUtility * craftAmt) - manuscriptUtilityLost;
     }
@@ -1876,35 +1873,23 @@ unsafeWindow.nineSouls = function() {
     function canUnlockRace(){
         // See diplomacy.js unlockRandomRace, ~ln 270
         // Is any of the "low requirement" 3 still locked
-        if(kg.diplomacy.races.slice(0, 3).find(r => !r.unlocked))
-            return true;
-        var nagas = kg.diplomacy.get("nagas");
-        if (!nagas.unlocked && kg.resPool.get("culture").value >= 1500){
-            return true;
-        }
-        var zebras = kg.diplomacy.get("zebras");
-        if (!zebras.unlocked && kg.resPool.get("ship").value >= 1){
-            return true;
-        }
-        var spiders = kg.diplomacy.get("spiders");
-        if (!spiders.unlocked && kg.resPool.get("ship").value >= 100 && kg.resPool.get("science").maxValue > 125000){
-            return true;
-        }
-        var dragons = kg.diplomacy.get("dragons");
-        if (!dragons.unlocked && kg.science.get("nuclearFission").researched){
-            return true;
-        }
+        if(kg.diplomacy.races.slice(0, 3).find(r => !r.unlocked)){ return true; }
+        const nagas = kg.diplomacy.get("nagas");
+        if (!nagas.unlocked && kg.resPool.get("culture").value >= 1500){ return true; }
+        const zebras = kg.diplomacy.get("zebras");
+        if (!zebras.unlocked && kg.resPool.get("ship").value >= 1){ return true; }
+        const spiders = kg.diplomacy.get("spiders");
+        if (!spiders.unlocked && kg.resPool.get("ship").value >= 100 && kg.resPool.get("science").maxValue > 125000){ return true; }
+        const dragons = kg.diplomacy.get("dragons");
+        if (!dragons.unlocked && kg.science.get("nuclearFission").researched){ return true; }
         return false;
     }
 
     function variableFromExplore() {
         kg.diplomacyTab.render();
-        if(!kg.diplomacyTab.visible)
-            return null;
-        if(!isFeasible(kg.diplomacyTab.exploreBtn))
-            return null; // Get some more kittens you pleb.
-        if(!canUnlockRace())
-            return null;
+        if(!kg.diplomacyTab.visible) { return null; }
+        if(!isFeasible(kg.diplomacyTab.exploreBtn)) { return null; } // Get some more kittens you pleb.
+        if(!canUnlockRace()) { return null; }
         return {
             name: "Explore",
             manpower: 1000,
@@ -1913,15 +1898,11 @@ unsafeWindow.nineSouls = function() {
     }
 
     function executeExplore() {
-        if(!kg.diplomacyTab.visible)
-            return null;
-        desiredExplore = (plan["Explore"] || 0);
-        if(desiredExplore < 1)
-            return;
-
-        var btn = kg.diplomacyTab.exploreBtn
+        if(!kg.diplomacyTab.visible) { return null; }
+        const desiredExplore = (plan.Explore || 0);
+        if(desiredExplore < 1) { return; }
+        const btn = kg.diplomacyTab.exploreBtn
         if(canAffordNow(kg.diplomacyTab.exploreBtn)){
-
             bePoetic("explore");
             kg.msg('9Souls: To seek out new life and new civilizations...');
             btn.buttonContent.click();
@@ -1936,32 +1917,31 @@ unsafeWindow.nineSouls = function() {
     //#region Hunts
 
     function variableFromHunt(){
-        if(!kg.villageTab.visible || !kg.villageTab.huntBtn.model.visible)
-            return [];
-        hunterRatio = kg.getEffect("hunterRatio") + kg.village.getEffectLeader("manager", 0);
-        ivoryProb = (0.45 + 0.02 * hunterRatio) / 2;
-        averageIvory = ivoryProb * (50 + (40 * hunterRatio));
-        averageFurs = (80 + (65 * hunterRatio)) / 2;
+        if(!kg.villageTab.visible || !kg.villageTab.huntBtn.model.visible) { return []; }
+        const hunterRatio = kg.getEffect("hunterRatio") + kg.village.getEffectLeader("manager", 0);
+        const ivoryProb = (0.45 + 0.02 * hunterRatio) / 2;
+        const averageIvory = ivoryProb * (50 + (40 * hunterRatio));
+        const averageFurs = (80 + (65 * hunterRatio)) / 2;
 
         // There is some utility to having a few luxury resources floating about (about a season's worth buffer?).
-        furRes = kg.resPool.get('furs');
-        ivoryRes = kg.resPool.get('ivory');
-        furCons = resoucePerTick(furRes, 0, null);
-        ivoryCons = resoucePerTick(ivoryRes, 0, null);
+        const furRes = kg.resPool.get('furs');
+        const ivoryRes = kg.resPool.get('ivory');
+        const furCons = resoucePerTick(furRes, 0, null);
+        const ivoryCons = resoucePerTick(ivoryRes, 0, null);
 
-        utilityForLux = 0
-        var furDesiredToBuffer = -1 * furCons * kg.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(furRes);
-        var huntsToFillFurBuffer = furDesiredToBuffer / averageFurs;
+        let utilityForLux = 0
+        const furDesiredToBuffer = -1 * furCons * kg.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(furRes);
+        const huntsToFillFurBuffer = furDesiredToBuffer / averageFurs;
         if(furDesiredToBuffer > 0){
             utilityForLux += happinessUtility;
         }
-        var ivoryDesiredToBuffer = -1 * ivoryCons * kg.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(ivoryRes);
-        var huntsToFillIvoryBuffer = ivoryDesiredToBuffer / averageIvory;
+        const ivoryDesiredToBuffer = -1 * ivoryCons * kg.ticksPerSecond * planHorizonSeconds() - projectResourceAmount(ivoryRes);
+        const huntsToFillIvoryBuffer = ivoryDesiredToBuffer / averageIvory;
         if(ivoryDesiredToBuffer > 0){
             utilityForLux += happinessUtility;
         }
         // Sooo sparkly.
-        unicornResource = kg.resPool.get('unicorns');
+        const unicornResource = kg.resPool.get('unicorns');
         if(unicornResource.value == 0){
             utilityForLux += 0.1;
         }
@@ -2000,29 +1980,26 @@ unsafeWindow.nineSouls = function() {
     }
 
     function executeHunts() {
-        if(!kg.villageTab.visible || !kg.villageTab.huntBtn.model.visible)
-            return;
-        desiredHunts = Math.ceil((plan["Hunt|ForResources"] || 0) + (plan["Hunt|ForLuxury"] || 0));
-        executedHunts = executedPlan["Hunt"] || 0;
-        desiredRemainingHunts = desiredHunts - executedHunts;
-        if(desiredRemainingHunts < 1)
-            return;
-        possibleHuntsNow = Math.floor(kg.resPool.get("manpower").value / 100);
-        if(possibleHuntsNow < 1)
-            return;
-        huntsToPerform = Math.min(desiredRemainingHunts, possibleHuntsNow)
+        if(!kg.villageTab.visible || !kg.villageTab.huntBtn.model.visible) { return; }
+        const desiredHunts = Math.ceil((plan["Hunt|ForResources"] || 0) + (plan["Hunt|ForLuxury"] || 0));
+        const executedHunts = executedPlan.Hunt || 0;
+        const desiredRemainingHunts = desiredHunts - executedHunts;
+        if(desiredRemainingHunts < 1) { return; }
+        const possibleHuntsNow = Math.floor(kg.resPool.get("manpower").value / 100);
+        if(possibleHuntsNow < 1) { return; }
+        const huntsToPerform = Math.min(desiredRemainingHunts, possibleHuntsNow)
         craftLog.log("Hunting ", huntsToPerform, huntsToPerform == possibleHuntsNow ? "  (as many as possible)" : ""," times (", executedHunts + huntsToPerform, "/", desiredHunts ,")")
 
         bePoetic("hunt");
         if(huntsToPerform == possibleHuntsNow){
             kg.village.huntAll()
         } else {
-            for(i = 0; i < huntsToPerform; i++){
+            for(let i = 0; i < huntsToPerform; i++){
                 kg.villageTab.huntBtn.buttonContent.click()
             }
         }
         executeCrafts();
-        executedPlan["Hunt"] = executedHunts + huntsToPerform;
+        executedPlan.Hunt = executedHunts + huntsToPerform;
     }
 
     //#endregion
@@ -2034,8 +2011,8 @@ unsafeWindow.nineSouls = function() {
     }
 
     function variableFromToggleableBuilding(bld){
-        bldId = buttonId(bld)
-        bv = {
+        const bldId = buttonId(bld)
+        const bv = {
             name: "ToggleBuilding|" + bldId
         };
         bv[bldId] = 1;
@@ -2059,10 +2036,10 @@ unsafeWindow.nineSouls = function() {
                 utility: bv.utility
             });
 
-            var coalRes = kg.resPool.get("coal");
-            var coalNoSteam = resoucePerTick(coalRes, 0);
-            var coalWithSteam = resoucePerTick(coalRes, 3, bld);
-            var coalPerTickDiff = coalNoSteam - coalWithSteam;
+            const coalRes = kg.resPool.get("coal");
+            const coalNoSteam = resoucePerTick(coalRes, 0);
+            const coalWithSteam = resoucePerTick(coalRes, 3, bld);
+            const coalPerTickDiff = coalNoSteam - coalWithSteam;
             bv.coal = coalPerTickDiff * kg.ticksPerSecond * planHorizonSeconds();
 
             if(effects.manuscriptPerTickProd){
@@ -2073,14 +2050,14 @@ unsafeWindow.nineSouls = function() {
     }
 
     function executeToggleBuildings(){
-        for(var bld of getToggleableBuildings()){
-            var bldId = buttonId(bld)
+        for(const bld of getToggleableBuildings()){
+            const bldId = buttonId(bld)
             const probOn = (plan["ToggleBuilding|" + bldId] || 0);
             const wantedOn = Math.random() < probOn ? true : false;
             const currentlyOn = bld.on == bld.val;
             if(wantedOn != currentlyOn){
                 buyableLog.log("%s desiredOn %s currentlyOn %s", bldId, wantedOn, currentlyOn);
-                var btn = kg.bldTab.children.find(btn => buttonId(btn) == bldId);
+                const btn = kg.bldTab.children.find(btn => buttonId(btn) == bldId);
                 btn.toggle.link.click();
             }
         }
@@ -2177,11 +2154,11 @@ unsafeWindow.nineSouls = function() {
     }
 
     function executeIncrementableBuilding(){
-        for(let toggleableBld of getIncrementableBuildings()) {
-            let desiredOn = plan["IncrementBuilding|" + toggleableBld.name] || 0;
-            var bldBtn = kg.bldTab.children.find(btn => btn.opts.building == toggleableBld.name)
-            var currentlyOn = bldBtn.model.on;
-            var prob = desiredOn - Math.floor(desiredOn)
+        for(const toggleableBld of getIncrementableBuildings()) {
+            const desiredOn = plan["IncrementBuilding|" + toggleableBld.name] || 0;
+            const bldBtn = kg.bldTab.children.find(btn => btn.opts.building == toggleableBld.name)
+            const currentlyOn = bldBtn.model.on;
+            const prob = desiredOn - Math.floor(desiredOn)
             if(Math.random() < prob){
                 desiredOn = Math.ceil(desiredOn)
             } else {
@@ -2193,24 +2170,26 @@ unsafeWindow.nineSouls = function() {
                 continue;
             }
 
-            var onLinksDiv = findHtmlCollection(bldBtn.buttonContent.children, c => c.tagName == "DIV" && findHtmlCollection(c.children, anc => anc.tagName == "A" && anc.title == "+") != null)
-            var offLinksDiv = findHtmlCollection(bldBtn.buttonContent.children, c => c.tagName == "DIV" && findHtmlCollection(c.children, anc => anc.tagName == "A" && anc.title == "-") != null)
-            var onMultiDiv = findHtmlCollection(onLinksDiv.children, c => c.tagName == "DIV" && c.className == "linkContent")
-            var offMultiDiv = findHtmlCollection(offLinksDiv.children, c => c.tagName == "DIV" && c.className == "linkContent")
+            const onLinksDiv = findHtmlCollection(bldBtn.buttonContent.children, c => c.tagName == "DIV" && findHtmlCollection(c.children, anc => anc.tagName == "A" && anc.title == "+") != null)
+            const offLinksDiv = findHtmlCollection(bldBtn.buttonContent.children, c => c.tagName == "DIV" && findHtmlCollection(c.children, anc => anc.tagName == "A" && anc.title == "-") != null)
+            const onMultiDiv = findHtmlCollection(onLinksDiv.children, c => c.tagName == "DIV" && c.className == "linkContent")
+            const offMultiDiv = findHtmlCollection(offLinksDiv.children, c => c.tagName == "DIV" && c.className == "linkContent")
             if(desiredOn == bldBtn.model.metadata.val){
                 //buyableLog.log("Firing up all ", toggleableBld.name)
-                var onAllLink = findHtmlCollection(onMultiDiv.children, l => l.tagName == "A" && l.title == "+all")
+                const onAllLink = findHtmlCollection(onMultiDiv.children, l => l.tagName == "A" && l.title == "+all")
                 onAllLink.click();
                 continue;
             }
             if(desiredOn == 0) {
                 //buyableLog.log("Power down all ", toggleableBld.name)
-                var offAllLink = findHtmlCollection(offMultiDiv.children, l => l.tagName == "A" && l.title == "-all")
+                const offAllLink = findHtmlCollection(offMultiDiv.children, l => l.tagName == "A" && l.title == "-all")
                 offAllLink.click();
                 continue;
             }
             //buyableLog.log("Moderating number of ", toggleableBld.name, " to ", desiredOn, " from ", currentlyOn)
-            var changeAmount = Math.abs(currentlyOn - desiredOn);
+            let changeAmount = Math.abs(currentlyOn - desiredOn);
+            var singleLink;
+            var twentyFiveLink;
             if(currentlyOn > desiredOn){
                 singleLink = findHtmlCollection(offLinksDiv.children, l => l.tagName == "A")
                 twentyFiveLink = findHtmlCollection(offMultiDiv.children, l => l.tagName == "A" && l.title == "-25")
@@ -2346,18 +2325,19 @@ unsafeWindow.nineSouls = function() {
                 }
             }
             else if (resourceModifier.name == 'Conversion Production' && lastMod != null){
+                let perTickProd = 0
                 switch(mode){
                     case 0:
                     case 1:
                         // simLog.log("Village / Fixed: Ingoring conversion")
                         break;
                     case 2:
-                        var perTickProd = effects[resource.name + "PerTickProd"] || 0;
+                        perTickProd = effects[resource.name + "PerTickProd"] || 0;
                         // simLog.log("Building: Production from bld %f", perTickProd.toFixed(2));
                         prod += perTickProd;
                         break;
                     case 3:
-                        var perTickProd = effects[resource.name + "PerTickProd"] || 0;
+                        perTickProd = effects[resource.name + "PerTickProd"] || 0;
                         // simLog.log("Steamworks: PerTickProd each from bld %f", perTickProd.toFixed(2))
                         prod += perTickProd * modeVariable.val;
                         break;
@@ -2518,14 +2498,12 @@ unsafeWindow.nineSouls = function() {
     }
 
     function kittenWithTrait(desiredTrait){
-        if(civilServiceNotResearched())
-            return null;
-        var candidates = kg.village.sim.kittens.filter(k => k.trait && k.trait.name == desiredTrait);
-        if(!candidates.length)
-            return null;
-        var bestBoi = null;
-        var bestRank = -1;
-        for(var idx = 0; idx < candidates.length; idx++){
+        if(civilServiceNotResearched()) { return null; }
+        const candidates = kg.village.sim.kittens.filter(k => k.trait && k.trait.name == desiredTrait);
+        if(!candidates.length) { return null; }
+        let bestBoi = null;
+        let bestRank = -1;
+        for(let idx = 0; idx < candidates.length; idx++){
             if(candidates[idx].rank > bestRank){
                 bestBoi = candidates[idx];
                 bestRank = bestBoi.rank;
@@ -2536,74 +2514,63 @@ unsafeWindow.nineSouls = function() {
 
     // NB: Return old leader in case we need to undo the change
     function doLeaderChangeTrait(desiredTrait){
-        if(civilServiceNotResearched())
-            return null;
+        if(civilServiceNotResearched()) { return null; }
         var previousLeader = kg.village.leader
         changeLeader(kittenWithTrait(desiredTrait));
         return previousLeader;
     }
 
     function changeLeader(kitten){
-        if(civilServiceNotResearched())
-            return;
-        if(!kitten)
-            return;
-        if(kg.village.leader == kitten)
-            return;
+        if(civilServiceNotResearched()) { return; }
+        if(!kitten) { return; }
+        if(kg.village.leader == kitten) { return; }
         //console.debug("Chaging leader to ", kitten.name, " ", kitten.surname, " (rank ", kitten.rank, kitten.trait ? kitten.trait.name : "", ")")
         kg.villageTab.censusPanel.census.makeLeader(kitten);
     }
 
     function craftBonusForLeaderSwitch(craftName){
-        for(desiredTrait of leaderDesiredTraitsFromCraft(craftName)){
-            if(kittenWithTrait(desiredTrait.trait))
-                return desiredTrait.bonus;
+        for(const desiredTrait of leaderDesiredTraitsFromCraft(craftName)){
+            if(kittenWithTrait(desiredTrait.trait)) { return desiredTrait.bonus; }
         }
         return 0;
     }
 
     function currentLeaderCraftBonus(craftName){
-        if(civilServiceNotResearched())
-            return 0;
-        if(!kg.village.leader)
-            return 0;
-        if(!kg.village.leader.trait)
-            return 0;
-        for(desiredEffect of leaderDesiredTraitsFromCraft(craftName)){
-            if(kg.village.leader.trait.name == desiredEffect.trait)
-                return desiredEffect.bonus;
+        if(civilServiceNotResearched()) { return 0; }
+        if(!kg.village.leader) { return 0; }
+        if(!kg.village.leader.trait) { return 0; }
+        for(const desiredEffect of leaderDesiredTraitsFromCraft(craftName)){
+            if(kg.village.leader.trait.name == desiredEffect.trait) { return desiredEffect.bonus; }
         }
         return 0;
     }
 
     function tradeBonusForLeaderSwitch(){
-        if(civilServiceNotResearched())
-            return 0;
-        if(kg.village.leader && kg.village.leader.trait && kg.village.leader.trait.name == "merchant")
-            return 0;
-        var burnedParagonRatio = 1 + kg.prestige.getBurnedParagonRatio();
-        var leaderRatio = 1;
+        if(civilServiceNotResearched()) { return 0; }
+        if(kg.village.leader && kg.village.leader.trait && kg.village.leader.trait.name == "merchant") { return 0; }
+        const burnedParagonRatio = 1 + kg.prestige.getBurnedParagonRatio();
+        let leaderRatio = 1;
         if (kg.science.getPolicy("monarchy").researched){
             leaderRatio = 1.95;
         }
-        if(kittenWithTrait("merchant"))
+        if(kittenWithTrait("merchant")) {
             return 0.03 * burnedParagonRatio * leaderRatio;
+        }
         return 0;
     }
 
     function switchLeaderToCraft(craftName){
-        if(civilServiceNotResearched())
-            return null;
+        if(civilServiceNotResearched()) { return null; }
             //console.debug("Attempting to switch leader to craft (so fickle)");
-        for(var desiredTrait of leaderDesiredTraitsFromCraft(craftName)){
+        for(const desiredTrait of leaderDesiredTraitsFromCraft(craftName)){
             // Do we already have leader with this trait?
             if(kg.village.leader && kg.village.leader.trait && kg.village.leader.trait.name == desiredTrait.trait){
                 //console.debug("Leader already has trait", desiredTrait.trait);
                 return null;
             }
-            var newLeader = kittenWithTrait(desiredTrait.trait)
+            const newLeader = kittenWithTrait(desiredTrait.trait)
             if(newLeader){
-                prevLeader = kg.village.leader;
+                const prevLeader = kg.village.leader;
                 //console.debug("Switching from ", prevLeader, " to ", newLeader);
                 changeLeader(newLeader);
                 return prevLeader;
@@ -2636,10 +2603,11 @@ unsafeWindow.nineSouls = function() {
                 return [{trait: "chemist", bonus: 0.075 * leaderRatio * burnedParagonRatio}, {trait: "engineer", bonus: 0.05 * leaderRatio * burnedParagonRatio}];
             default: {
                 var craftableResource = kg.resPool.get(craftName);
-                if(craftableResource.craftable)
+                if(craftableResource.craftable) {
                     return [{trait: "engineer", bonus: 0.05 * leaderRatio * burnedParagonRatio}];
-                else
+                } else {
                     return [];
+                }
             }
         }
     }
@@ -2650,10 +2618,7 @@ unsafeWindow.nineSouls = function() {
             var bIsManager = b.trait && b.trait.name == "manager";
             if(aIsManager){
                 if(bIsManager){
-                    if(a.rank > b.rank)
-                        return a;
-                    else
-                        return b;
+                    if(a.rank > b.rank) { return a; } else { return b; }
                 } else {
                     return a;
                 }
@@ -2661,10 +2626,7 @@ unsafeWindow.nineSouls = function() {
                 if(bIsManager){
                     return b;
                 } else {
-                    if(a.rank > b.rank)
-                        return a;
-                    else
-                        return b;
+                    if(a.rank > b.rank) { return a; } else { return b; }
                 }
             }
         };
@@ -2672,13 +2634,11 @@ unsafeWindow.nineSouls = function() {
     }
 
     function variableForPromoteLeader(){
-        if(civilServiceNotResearched())
-            return null;
+        if(civilServiceNotResearched()) { return null; }
         var highRank = kittenForPromotion();
         var expToPromote = kg.village.sim.expToPromote(highRank.rank, highRank.rank + 1, highRank.exp)
         // Not much we can do about a lack of experience.
-        if(!expToPromote[0])
-            return null;
+        if(!expToPromote[0]) { return null; }
         // We just need to find out how much, hence assume infinite resource.
         var goldToPromote = kg.village.sim.goldToPromote(highRank.rank, highRank.rank + 1, Infinity)
         return {
@@ -2690,16 +2650,13 @@ unsafeWindow.nineSouls = function() {
     }
 
     function promoteUnderPlan(){
-        if((plan.PromoteLeader || 0) < 1)
-            return;
-        if(executedPlan.PromoteLeader)
-            return;
-        if(civilServiceNotResearched())
-            return null;
+        if((plan.PromoteLeader || 0) < 1) { return; }
+        if(executedPlan.PromoteLeader) { return; }
+        if(civilServiceNotResearched()) { return null; }
         const timeEnter = performance.now();
-        var highRank = kittenForPromotion();
-        var expToPromote = kg.village.sim.expToPromote(highRank.rank, highRank.rank + 1, highRank.exp);
-        var goldToPromote = kg.village.sim.goldToPromote(highRank.rank, highRank.rank + 1, kg.resPool.get("gold").value);
+        const highRank = kittenForPromotion();
+        const expToPromote = kg.village.sim.expToPromote(highRank.rank, highRank.rank + 1, highRank.exp);
+        const goldToPromote = kg.village.sim.goldToPromote(highRank.rank, highRank.rank + 1, kg.resPool.get("gold").value);
         if (expToPromote[0] && goldToPromote[0]) {
             bePoetic("promotion");
             execLog.info("Congrats to %s %s who was promoted from rank %i to %i", highRank.name, highRank.surname, highRank.rank, highRank.rank + 1)
@@ -3116,8 +3073,9 @@ unsafeWindow.nineSouls = function() {
         for(let eh of historicExecution.toArray()){
             if(eh){
                 for(let item in eh){
-                    if(item.startsWith("Build|"))
+                    if(item.startsWith("Build|")) {
                         purchases.push({time: eh.validTo.toLocaleTimeString(), item: item});
+                    }
                 }
             }
         }
@@ -3216,14 +3174,12 @@ unsafeWindow.nineSouls = function() {
     }
 
     function executeResetLogic(){
-        var planningSince = shouldStartResetCountdown();
-        if(!planningSince)
-            return;
+        const planningSince = shouldStartResetCountdown();
+        if(!planningSince) { return; }
         const resetTime = addMinutes(planningForResetSince, 20);
-        var timeLeftSecs = (resetTime - new Date()) / 1000;
+        let timeLeftSecs = (resetTime - new Date()) / 1000;
 
-        if(timeLeftSecs <= 0)
-        {
+        if(timeLeftSecs <= 0) {
             execLog.warn("Goodbye cruel world!");
             praiseBeforeReset();
             kg.reset();
@@ -3237,12 +3193,14 @@ unsafeWindow.nineSouls = function() {
         }
         var diffMins = Math.floor(timeLeftSecs / 60);
         var diffSeconds = Math.floor(timeLeftSecs - (diffMins * 60));
-        if(diffMins)
+        if(diffMins) {
             diffMins += " mins"
-        if(diffSeconds)
+        }
+        if(diffSeconds) {
             diffSeconds = " " + diffSeconds + " seconds"
-        else
+        } else {
             diffSeconds = ""
+        }
         var msg = "THE END IS NIGH. Reset in approximately " + diffMins + diffSeconds
         execLog.warn(msg);
         if(uiReminder){
@@ -3306,8 +3264,7 @@ unsafeWindow.nineSouls = function() {
 
     function findContext(poemLines, context){
         var lineIdx = poemLines.findIndex(l => l.includes(context));
-        if(lineIdx < 0)
-            return null;
+        if(lineIdx < 0) { return null; }
         var contextStartLine = lineIdx;
         var contextStart = poemLines[lineIdx].indexOf(context);
         var contextEndLine = lineIdx;
@@ -3409,8 +3366,8 @@ unsafeWindow.nineSouls = function() {
             utility: utility
         }
         sellVariable[id + "Sell"] = 1;
-        for(pe of button.model.metadata.prices){
-            const lastCost = pe.val *  Math.pow(button.model.metadata.priceRatio, button.model.metadata.val - 1);
+        for(const pe of button.model.metadata.prices){
+            const lastCost = pe.val * Math.pow(button.model.metadata.priceRatio, button.model.metadata.val - 1);
             const refundedAmount = button.model.refundPercentage * lastCost;
             buyableLog.log("%s: Resource %s lastCost %f refund amt %f", id, pe.name, lastCost.toFixed(2), refundedAmount.toFixed(2));
             sellVariable[pe.name] = -refundedAmount;
@@ -3420,15 +3377,13 @@ unsafeWindow.nineSouls = function() {
     }
 
     function executeSellItems(){
-        var sales = segmentPlan().Sell;
-        if(!sales)
-            return;
-        for(var sellItemId in sales){
-            if(sales[sellItemId] < buyThreshold)
-                continue;
+        const sales = segmentPlan().Sell;
+        if(!sales) { return; }
+        for(const sellItemId in sales){
+            if(sales[sellItemId] < buyThreshold) { continue; }
             // Ok I suppose we're really doing this!
-            var sellBtn = getSellable().find(s => buttonId(s) == sellItemId);
-            if(!sellBtn || !sellBtn.sellHref || !sellBtn.sellHref.link)
+            const sellBtn = getSellable().find(s => buttonId(s) == sellItemId);
+            if(!sellBtn || !sellBtn.sellHref || !sellBtn.sellHref.link) { return; }
             kg.msg('9Souls: Selling ' + buttonLabel(sellBtn) + "!");
             executeCrafts();
             sellBtn.sellHref.link.click();
@@ -3474,8 +3429,7 @@ unsafeWindow.nineSouls = function() {
     }
 
     function makeUi(){
-        if(document.getElementById("9s"))
-            return;
+        if(document.getElementById("9s")) { return; }
         var scriptBox = addElement("leftColumn", "div", {id: "9s"});
         addElement(scriptBox, "style", {}, `
 .9s-ui {

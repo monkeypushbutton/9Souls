@@ -1,0 +1,28 @@
+{
+  "type": "module",
+  "name": "9souls",
+  "version": "1.0.0",
+  "description": "Automation engine for Kittens Game https://kittensgame.com/web/#",
+  "main": "app.js",
+  "dependencies": {
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "esbuild app.js --bundle --outfile=out/main.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/monkeypushbutton/9Souls.git"
+  },
+  "keywords": [
+    "KittensGame",
+    "bloodrizer"
+  ],
+  "author": "David Hatfield (monkeypushbutton)",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/monkeypushbutton/9Souls/issues"
+  },
+  "homepage": "https://github.com/monkeypushbutton/9Souls#readme"
+}
